@@ -16,6 +16,14 @@ A Data and GenAI Platform that connects Generative AI to a Data Warehouse.
 - A strictly-typed, engine-agnostic data-access layer that allows a seamless
   future migration to Google BigQuery.
 
+## Team Handoff Docs
+
+- [README_SPECKIT.md](README_SPECKIT.md): how Spec Kit was used in this repo,
+  folder-by-folder explanation of OpenSpec artifacts, and a continuation
+  playbook for future features.
+- [README_STATUS.md](README_STATUS.md): current project status, delivered scope,
+  risks, roadmap milestones, and next recommended execution steps.
+
 ## Prerequisites
 
 - [Docker](https://www.docker.com/) (with Docker Compose) installed and running.
