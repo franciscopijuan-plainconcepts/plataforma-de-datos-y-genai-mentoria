@@ -1,0 +1,34 @@
+# Docker Compose for the local PostgreSQL data warehouse (baseline).
+# Connection parameters are externalized via environment variables (FR-006).
+# Usage: docker compose -f docker/docker-compose.yml up -d
+#
+# Constitution Principle III: local dev runs entirely inside Docker with
+# PostgreSQL as the ONLY local data store; no host-installed DB is required.
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: plataforma_postgres
+    restart: unless-stopped
+    environment:
+      # Externalized — values come from .env (see .env.example). FR-006.
+      POSTGRES_USER: ${POSTGRES_USER:-plataforma}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-plataforma_dev}
+      POSTGRES_DB: ${POSTGRES_DB:-global_superstore}
+    ports:
+      # Configurable host port (override via .env) to avoid collisions. FR-006.
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      # Named volume for optional persistence (teardown may remove it). FR-007.
+      - plataforma_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      # Used by the bootstrap command to wait for readiness. FR-013.
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-plataforma} -d ${POSTGRES_DB:-global_superstore}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+volumes:
+  plataforma_pgdata:
+    name: plataforma_pgdata

@@ -1,0 +1,47 @@
+{
+  "source_file": "/home/franciscopijuan/PROJECTS/MENTORIA/Plataforma_de_Datos_y_GenAI/Global Superstore Data.xlsx",
+  "source_sha256": "d7a805f6cfd26339f478a3de6a6f128ea156179be093e09a1f528776fd5fdc3e",
+  "schema_version": "v1",
+  "loaded_at": "2026-07-30T16:04:11.382914Z",
+  "git_commit": "unknown",
+  "tool_versions": {
+    "python": "3.13.14",
+    "pandas": "3.0.5",
+    "platform": "Linux-6.6.87.2-microsoft-standard-WSL2-x86_64-with-glibc2.35"
+  },
+  "per_table": [
+    {
+      "table_name": "Orders",
+      "row_count": 51290,
+      "column_count": 0,
+      "load_result": {
+        "table_name": "Orders",
+        "rows_loaded": 51290,
+        "rows_rejected": 0,
+        "errors": []
+      }
+    },
+    {
+      "table_name": "Returns",
+      "row_count": 2033,
+      "column_count": 0,
+      "load_result": {
+        "table_name": "Returns",
+        "rows_loaded": 2033,
+        "rows_rejected": 0,
+        "errors": []
+      }
+    },
+    {
+      "table_name": "People",
+      "row_count": 24,
+      "column_count": 0,
+      "load_result": {
+        "table_name": "People",
+        "rows_loaded": 24,
+        "rows_rejected": 0,
+        "errors": []
+      }
+    }
+  ]
+}

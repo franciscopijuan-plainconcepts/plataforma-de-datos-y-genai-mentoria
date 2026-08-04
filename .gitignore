@@ -1,0 +1,56 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+*.egg
+.eggs/
+build/
+dist/
+wheels/
+
+# --- Virtual environments ---
+.venv/
+venv/
+env/
+ENV/
+
+# --- Environment / secrets (NEVER commit) ---
+.env
+.env.*
+!.env.example
+
+# --- Type-checker / test caches ---
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.cache/
+
+# --- Coverage ---
+htmlcov/
+.coverage
+.coverage.*
+coverage.xml
+*.cover
+
+# --- IDE / editor ---
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# --- OS ---
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# --- Jupyter ---
+.ipynb_checkpoints/
+
+# --- Local artifacts ---
+# The data dictionary is regeneratable (FR-012); keep it committed for the
+# baseline so reviewers can read it without running the pipeline. Uncomment
+# to ignore it if you prefer to regenerate on demand.
+# data_dictionary.md
