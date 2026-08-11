@@ -4,15 +4,20 @@ Documento vivo para seguimiento del estado actual, decisiones clave, riesgos y s
 
 ## Estado actual (snapshot)
 
-- Fecha de actualizacion: 2026-08-04
-- Branch principal: main
-- Estado global: Baseline v0 completada y validada
+- Fecha de actualizacion: 2026-08-11
+- Branch principal: main (feature en `002-text-to-sql-v1`)
+- Estado global: v1.0/v1.1 Text-to-SQL implementado y validado
 - Ambito completado:
-  - Warehouse local PostgreSQL en Docker
-  - Ingestion desde Global Superstore Data.xlsx
-  - Data dictionary generado y versionado
-  - CLI operativa: bootstrap, teardown, validate, generate-dictionary
-  - Contratos tipados, boundaries y tests de integracion
+  - Warehouse local PostgreSQL en Docker (v0 baseline)
+  - Ingestion desde Global Superstore Data.xlsx (v0)
+  - Data dictionary generado y versionado (v0)
+  - CLI operativa baseline: bootstrap, teardown, validate, generate-dictionary (v0)
+  - Contratos tipados, boundaries y tests de integracion (v0)
+  - **Text-to-SQL v1.0**: pipeline NL → LLM → SQL validado → ejecucion → resultados tipados (v1.0)
+  - **Text-to-SQL v1.1**: logging estructurado + sanity-check evaluation (~10 preguntas) (v1.1)
+  - Nuevos comandos CLI: `ask <question>` y `evaluate` (v1.0/v1.1)
+  - Nuevo dominio `src/ai_engineering/` (llm_client, prompt_builder, sql_validator, pipeline, evaluation)
+  - `QueryProvider` Protocol extendido con `execute_readonly_query` (read-only, tipado)
 
 ## Evidencias de completitud
 
@@ -36,12 +41,22 @@ Documento vivo para seguimiento del estado actual, decisiones clave, riesgos y s
 - Diccionario de datos con semantica + tipos inferidos + notas de calidad.
 - Reproducibilidad baseline (flujo bootstrap/validate/teardown estable).
 
-### Pendiente para v1.x (siguiente)
+### Entregado en v1.0 (hecho)
 
-- v1.0: capa inicial de Text-to-SQL sobre Orders.
-- v1.1: mejoras de robustez Text-to-SQL (validaciones, hardening, evaluacion).
+- Pipeline Text-to-SQL: NL question → LLM (Forge/OpenAI SDK) → SQL validado → ejecucion → resultados tipados.
+- SQL validator: SELECT-only, Orders-only, columnas-existentes, no comentarios, single-statement.
+- Prompt builder: serializa DataDictionaryDocument en formato condensado (~500-800 tokens).
+- LLM client: wrapper tipado del OpenAI SDK con config por env vars (`FORGE_*`).
+- Comando CLI `ask <question>`: imprime SQL generado + resultados tipados.
+- Boundary test: `openai`/`httpx` confinados a `src/ai_engineering/`.
 
-### Pendiente para v2.0 (posterior)
+### Entregado en v1.1 (hecho)
+
+- Logging estructurado por cada call (`.artifacts/text_to_sql.log`).
+- Sanity-check evaluation: ~10 preguntas, comparacion de SQL normalizado, summary simple.
+- Comando CLI `evaluate`: corre el sanity check e imprime `X / N correct`.
+
+### Pendiente para v2.0 (siguiente)
 
 - Semantic Layer para formalizar metrica/logica de negocio.
 - Governance sobre la capa semantica.
@@ -92,8 +107,9 @@ RLS/RBAC no esta activo en v0; no asumir controles de acceso avanzados hasta v2.
 
 | ID | Hito | Estado | Owner | Fecha objetivo | Notas |
 |---|---|---|---|---|---|
-| M1 | v1.0 Text-to-SQL sobre Orders | Pendiente | TBD | TBD | Definir alcance minimo y dataset de evaluacion |
-| M2 | v1.1 Hardening de Text-to-SQL | Pendiente | TBD | TBD | Guardrails, evaluacion, observabilidad |
+| M0 | v0 Baseline (warehouse + dictionary) | Completado | - | 2026-08-04 | Local PostgreSQL + data dictionary + CLI |
+| M1 | v1.0 Text-to-SQL sobre Orders | Completado | - | 2026-08-11 | Pipeline NL→SQL→resultados tipados |
+| M2 | v1.1 Hardening + Evaluation | Completado | - | 2026-08-11 | Logging + sanity-check (~10 preguntas) |
 | M3 | v2.0 Semantic Layer + Governance | Pendiente | TBD | TBD | Modelado semantico, RBAC/RLS |
 
 ## Rutina de mantenimiento de este documento
