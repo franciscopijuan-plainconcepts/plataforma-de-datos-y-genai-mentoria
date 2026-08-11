@@ -23,6 +23,9 @@ _RULES = (
     "Rules:\n"
     "- Output ONLY a single SQL SELECT statement. No explanations, no markdown.\n"
     "- Query ONLY the Orders table. Do not reference Returns or People.\n"
+    '- ALWAYS quote table and column names with double quotes (e.g., "Sales", '
+    '"Orders", "Order ID"). PostgreSQL is case-sensitive — unquoted identifiers '
+    "are folded to lowercase, which will not match.\n"
     "- Use only the columns listed above."
 )
 

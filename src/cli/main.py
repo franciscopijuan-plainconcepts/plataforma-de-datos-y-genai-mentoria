@@ -26,6 +26,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from dotenv import load_dotenv
+
 from src.contracts.ingestion import SchemaInferenceResult
 from src.data_access.adapters.postgres.connection import PostgresConfig
 from src.data_access.adapters.postgres.repository import PostgresRepository
@@ -48,6 +50,10 @@ _MANIFEST_PATH = _REPO_ROOT / ".artifacts" / "load_manifest.json"
 _DICTIONARY_PATH = _REPO_ROOT / "data_dictionary.md"
 # Expected row counts from the EDA (see research.md Part A) — the validator
 # uses these to confirm the loaded warehouse matches the canonical dataset.
+
+# Load .env from the repository root so FORGE_API_KEY and POSTGRES_* are
+# available without manually sourcing .env. Safe if .env doesn't exist.
+load_dotenv(_REPO_ROOT / ".env")
 _EXPECTED_ROW_COUNTS = {
     "Orders": 51290,
     "Returns": 2033,
