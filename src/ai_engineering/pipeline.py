@@ -19,6 +19,7 @@ from src.ai_engineering.prompt_builder import build_prompt
 from src.ai_engineering.sql_validator import validate_sql
 from src.contracts.data_access import TableDef
 from src.contracts.dictionary import DataDictionaryDocument
+from src.contracts.semantic_layer import SemanticLayerDocument, SemanticViewer
 from src.contracts.text_to_sql import (
     GeneratedSql,
     LlmConfig,
@@ -36,11 +37,16 @@ _logger = logging.getLogger(__name__)
 _LOG_PATH = Path(".artifacts") / "text_to_sql.log"
 
 
-def _log_call(response: "TextToSqlResponse", latency_ms: int) -> None:
-    """Log a Text-to-SQL call to the structured log (FR-014).
+def _log_call(
+    response: "TextToSqlResponse",
+    latency_ms: int,
+    viewer: SemanticViewer | None = None,
+) -> None:
+    """Log a Text-to-SQL call to the structured log (FR-014 + FR-021).
 
     Logs: timestamp, input question, generated SQL, validation outcome,
-    result/error, latency_ms. Uses a simple append format.
+    result/error, latency_ms. v2.0: also logs viewer_id, regions, gov_bypass
+    flag when a SemanticViewer is active.
     """
     from datetime import datetime, timezone
 
@@ -56,9 +62,17 @@ def _log_call(response: "TextToSqlResponse", latency_ms: int) -> None:
     else:
         rows = 0
         err = response.error or ""
+    viewer_id = viewer.viewer_id if viewer is not None else "none"
+    regions = list(viewer.regions) if viewer is not None else []
+    gov_bypass = (
+        viewer.allows_full_access and viewer.is_local_dev
+        if viewer is not None
+        else False
+    )
     line = (
         f"[{ts}] question={q!r} sql={sql!r} accepted={accepted} "
-        f"reason={reason!r} rows={rows} error={err!r} latency_ms={latency_ms}\n"
+        f"reason={reason!r} rows={rows} error={err!r} latency_ms={latency_ms} "
+        f"viewer_id={viewer_id} regions={regions!r} gov_bypass={gov_bypass}\n"
     )
     with _LOG_PATH.open("a", encoding="utf-8") as f:
         f.write(line)
@@ -81,12 +95,21 @@ class TextToSqlPipeline:
         llm_client: LlmClient,
         query_provider: QueryProvider,
         llm_config: LlmConfig,
+        semantic_layer: SemanticLayerDocument | None = None,
+        viewer: SemanticViewer | None = None,
     ) -> None:
         self._dictionary = dictionary
         self._table_def = table_def
         self._llm_client = llm_client
         self._query_provider = query_provider
         self._llm_config = llm_config
+        # v2.0: optional semantic layer enriches the prompt with metrics/dimensions.
+        # When None, build_prompt falls back to v1.x behavior (FR-016).
+        self._semantic_layer = semantic_layer
+        # v2.0: optional viewer used for logging governance context.
+        # The actual RLS enforcement happens in GovernedQueryProvider (the
+        # query_provider delegate); the pipeline only logs the viewer for audit.
+        self._viewer = viewer
 
     def run(self, question: NLQuestion) -> TextToSqlResponse:
         """Run the full Text-to-SQL pipeline for a single question.
@@ -94,8 +117,13 @@ class TextToSqlPipeline:
         Catches all errors and surfaces them in `TextToSqlResponse.error`
         (FR-013 fail-fast for API key; other errors captured gracefully).
         """
-        # 1. Build the prompt.
-        prompt = build_prompt(question, self._dictionary, self._table_def)
+        # 1. Build the prompt (v2.0: pass semantic_layer if available).
+        prompt = build_prompt(
+            question=question,
+            dictionary=self._dictionary,
+            table_def=self._table_def,
+            semantic_layer=self._semantic_layer,
+        )
 
         # 2. Call the LLM.
         try:
@@ -112,7 +140,7 @@ class TextToSqlPipeline:
                 ),
                 error=f"LLM call failed: {exc}",
             )
-            _log_call(response, 0)
+            _log_call(response, 0, self._viewer)
             return response
 
         # 3. Validate the SQL.
@@ -130,7 +158,7 @@ class TextToSqlPipeline:
                 validation=validation,
                 query_result=None,
             )
-            _log_call(response, 0)
+            _log_call(response, 0, self._viewer)
             return response
 
         # 4. Execute the validated SQL.
@@ -172,7 +200,7 @@ class TextToSqlPipeline:
             validation=validation,
             query_result=result,
         )
-        _log_call(response, latency_ms)
+        _log_call(response, latency_ms, self._viewer)
         return response
 
 

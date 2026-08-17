@@ -108,9 +108,14 @@ def test_comment_rejected() -> None:
 
 
 def test_non_orders_table_rejected() -> None:
-    result = validate_sql('SELECT * FROM Returns', TABLE_DEF)
+    """v2.0: Returns is now allowed as a JOIN target, but People must be rejected."""
+    # Returns references are now accepted (v2.0 net-sales metrics need them).
+    # The assertion that Returns is rejected has moved to v1.x behavior; here we
+    # assert that People (out-of-scope governance mapping) is still rejected.
+    result = validate_sql('SELECT * FROM People', TABLE_DEF)
     assert not result.accepted
-    assert "Returns" in (result.reason or "") or "out-of-scope" in (result.reason or "").lower()
+    reason = (result.reason or "").lower()
+    assert "people" in reason or "out-of-scope" in reason
 
 
 def test_people_table_rejected() -> None:
@@ -143,3 +148,39 @@ def test_truncate_rejected() -> None:
 def test_create_rejected() -> None:
     result = validate_sql('CREATE TABLE foo (id int)', TABLE_DEF)
     assert not result.accepted
+
+
+# --- v2.0 (feature 003): Returns JOIN accepted, People rejected ---
+
+def test_returns_join_accepted() -> None:
+    """v2.0: SQL that references Returns (for net-sales-style metrics) is accepted.
+
+    The SqlValidator was extended in feature 003 to allow Returns references
+    so the LLM can compute net_sales, returned_amount, return_rate, etc.
+    """
+    sql = (
+        'SELECT o."Region", SUM(o."Sales") AS net '
+        "FROM Orders o "
+        'WHERE NOT EXISTS (SELECT 1 FROM Returns r WHERE r."Order ID" = o."Order ID") '
+        'GROUP BY o."Region"'
+    )
+    result = validate_sql(sql, TABLE_DEF)
+    assert result.accepted, f"Expected accepted, got: {result.reason}"
+
+
+def test_people_join_rejected() -> None:
+    """v2.0: People stays rejected — it is NOT a query surface for the LLM.
+
+    People is the governance mapping (viewer -> regions); it must never appear
+    in LLM-generated SQL. The validator rejects it with a clear message.
+    """
+    sql = (
+        'SELECT o."Region", p."Person" '
+        'FROM Orders o JOIN People p ON o."Region" = p."Region"'
+    )
+    result = validate_sql(sql, TABLE_DEF)
+    assert not result.accepted
+    reason = (result.reason or "").lower()
+    assert "people" in reason or "out-of-scope" in reason, (
+        f"Expected rejection reason to mention People, got: {result.reason!r}"
+    )
