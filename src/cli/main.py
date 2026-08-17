@@ -366,18 +366,64 @@ def cmd_ask(
     config = PostgresConfig.from_env()
 
     # --- Resolve the viewer (governance context) ---
+    # v2.0 "login as a person" model: try the People table first (the canonical
+    # governance mapping per constitution Principle IV), then fall back to the
+    # static `viewers.yaml` registry for escape hatches like `admin_dev`.
+    import os
+
+    is_local_dev = os.environ.get("ENV", "").strip().lower() in {"local", "dev", "test"}
+
     viewer: SemanticViewer | None = None
     if viewer_id is not None:
-        try:
-            viewer = ViewerRegistry().get_viewer(viewer_id)
-        except FileNotFoundError as exc:
-            _err(str(exc))
-        except ValueError as exc:
-            _err(str(exc))
-        _info(
-            f"Loaded viewer {viewer_id!r}: regions={list(viewer.regions)} "
-            f"allows_full_access={viewer.allows_full_access}"
+        from src.data_engineering.semantic_layer.person_resolver import (
+            PeopleViewerResolver,
         )
+
+        # The People resolver needs an UNGOVERNED provider so it can read the
+        # full People table without being scoped by RLS (People IS the mapping,
+        # not subject to it). We use the raw PostgresRepository here, and build
+        # the GovernedQueryProvider below for the actual ask pipeline.
+        with PostgresRepository(config=config) as people_repo:
+            people_resolver = PeopleViewerResolver(
+                query_provider=people_repo,
+                is_local_dev=is_local_dev,
+            )
+            try:
+                viewer = people_resolver.resolve(viewer_id)
+            except Exception as exc:
+                _err(
+                    f"Could not read the People table to resolve viewer "
+                    f"{viewer_id!r}: {exc}. Is the warehouse running?"
+                )
+
+        if viewer is not None:
+            _info(
+                f"Logged in as person {viewer_id!r}: "
+                f"region={viewer.regions!r} (resolved from People table)"
+            )
+        else:
+            # People did not match → fall back to the static viewers.yaml registry.
+            try:
+                viewer = ViewerRegistry().get_viewer(viewer_id)
+                _info(
+                    f"Loaded viewer {viewer_id!r} from viewers.yaml: "
+                    f"regions={list(viewer.regions)} "
+                    f"allows_full_access={viewer.allows_full_access}"
+                )
+            except FileNotFoundError as exc:
+                _err(str(exc))
+            except ValueError as exc:
+                # No match in People nor viewers.yaml — list both sources.
+                try:
+                    available_people = people_resolver.list_available()
+                except Exception:
+                    available_people = []
+                _err(
+                    f"Viewer {viewer_id!r} not found. "
+                    f"People available: {available_people}. "
+                    f"Configure custom viewers in viewers.yaml (see "
+                    "viewers.example.yaml)."
+                )
     elif allow_full_access:
         # `--allow-full-access` without --viewer: build an ad-hoc full-access viewer.
         # Only effective in local/dev (the registry enforces is_local_dev gating).
@@ -663,6 +709,9 @@ def main(argv: list[str] | None = None) -> None:
         print("  generate-dictionary [--source P]  Generate data_dictionary.md from the schema")
         print("  generate-semantic-layer            Generate .artifacts/semantic_layer.{json,md}")
         print("  ask <question> [--viewer <id>]     Translate a natural-language question to SQL")
+        print("                                      (--viewer <id> resolves a person from the")
+        print("                                       People table, or a custom viewer from")
+        print("                                       viewers.yaml)")
         print("  evaluate                           Run sanity-check evaluation (v1.1)")
         sys.exit(0 if args else 1)
 

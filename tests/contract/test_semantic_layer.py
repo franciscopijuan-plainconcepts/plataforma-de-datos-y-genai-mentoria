@@ -345,10 +345,11 @@ def test_governed_query_provider_calls_resolver_then_delegates() -> None:
     provider.execute_readonly_query('SELECT * FROM Orders', table_def)
     # Delegate was called exactly once.
     assert delegate.calls == 1
-    # The delegated SQL contains the RLS wrap (apply_rls ran).
+    # The delegated SQL contains the RLS predicate (apply_rls ran).
+    # The resolver injects the WHERE clause directly into the SQL rather
+    # than wrapping it in a subquery (robust for aggregation queries).
     assert delegate.received_sql is not None
     assert '"Region" IN' in delegate.received_sql
-    assert "_gov" in delegate.received_sql
 
 
 def test_ungoverned_fail_fast_provider_raises_on_query() -> None:

@@ -2,8 +2,8 @@
   "source_file": "/home/franciscopijuan/PROJECTS/MENTORIA/Plataforma_de_Datos_y_GenAI/Global Superstore Data.xlsx",
   "source_sha256": "d7a805f6cfd26339f478a3de6a6f128ea156179be093e09a1f528776fd5fdc3e",
   "schema_version": "v1",
-  "loaded_at": "2026-08-17T11:43:19.771993Z",
-  "git_commit": "64e6b86dde162a4d1502d48539865f8b59488c79",
+  "loaded_at": "2026-08-17T12:57:16.033883Z",
+  "git_commit": "52f3e38b07b416c3b1c21c4499ba1a1388c17863",
   "tool_versions": {
     "python": "3.13.14",
     "pandas": "3.0.5",

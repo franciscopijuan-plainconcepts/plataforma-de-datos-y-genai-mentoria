@@ -45,17 +45,21 @@ def _viewer(regions: list[str], allows_full_access: bool = False) -> SemanticVie
 # --- Basic wrapping behavior ---------------------------------------------
 
 
-def test_single_region_wraps_with_in_clause() -> None:
+def test_single_region_injects_in_clause() -> None:
+    """v2.0: RLS predicate is injected directly into the SQL WHERE (not subquery wrap).
+
+    This is robust for aggregation queries (e.g. `SELECT SUM(...) FROM Orders`)
+    that do not expose the Region column in their outer projection."""
     resolver = SemanticQueryResolver()
     viewer = _viewer(["Caribbean"])
     sql = 'SELECT SUM("Sales") FROM Orders'
     result = resolver.apply_rls(sql, viewer, _orders_table_def())
-    # The wrapping should produce a SELECT * FROM (...) AS _gov WHERE "Region" IN ('Caribbean')
-    assert result.startswith("SELECT * FROM (")
-    assert result.endswith('WHERE "Region" IN (\'Caribbean\')')
-    # The original SQL should be inside the subquery.
+    # The injected predicate should appear inside the SQL.
+    assert '"Region" IN (\'Caribbean\')' in result
+    # The original SQL's SELECT/aggregation should be preserved.
     assert 'SELECT SUM("Sales") FROM Orders' in result
-    assert "_gov AS " not in result  # alias is OUTSIDE the subquery
+    # No subquery wrapping alias should be present.
+    assert "_gov" not in result
 
 
 def test_multiple_regions_join_with_commas() -> None:
@@ -63,10 +67,9 @@ def test_multiple_regions_join_with_commas() -> None:
     viewer = _viewer(["Caribbean", "Central America"])
     sql = 'SELECT * FROM Orders'
     result = resolver.apply_rls(sql, viewer, _orders_table_def())
-    assert result == (
-        'SELECT * FROM (SELECT * FROM Orders) AS _gov '
-        'WHERE "Region" IN (\'Caribbean\', \'Central America\')'
-    )
+    # No existing WHERE -> inject `WHERE "Region" IN (...)` at the end (before any
+    # GROUP BY / LIMIT, which are absent here).
+    assert result == 'SELECT * FROM Orders WHERE "Region" IN (\'Caribbean\', \'Central America\')'
 
 
 # --- Empty regions => WHERE FALSE (viewer sees 0 rows) -------------------
@@ -126,15 +129,15 @@ def test_full_access_in_non_local_environment_falls_back_to_where_false() -> Non
 # --- Preserve existing WHERE / GROUP BY / LIMIT -------------------------
 
 
-def test_existing_where_is_preserved_inside_subquery() -> None:
-    """The wrapping must NOT mangle an existing WHERE inside the original SQL."""
+def test_existing_where_ands_predicate() -> None:
+    """When the SQL already has a WHERE, the predicate is AND-ed with the existing one."""
     resolver = SemanticQueryResolver()
     viewer = _viewer(["Caribbean"])
     sql = 'SELECT * FROM Orders WHERE "Region" = \'Central US\''
     result = resolver.apply_rls(sql, viewer, _orders_table_def())
-    # The original WHERE is inside the subquery; the outer WHERE narrows it.
-    assert 'WHERE "Region" = \'Central US\'' in result  # original WHERE intact
-    assert result.endswith('WHERE "Region" IN (\'Caribbean\')')  # outer filter added
+    # The original WHERE should remain in-place, with the new predicate AND-ed.
+    assert 'WHERE "Region" = \'Central US\'' in result
+    assert 'AND "Region" IN (\'Caribbean\')' in result
 
 
 def test_group_by_is_preserved_inside_subquery() -> None:
@@ -214,13 +217,16 @@ def test_region_with_semicolon_cannot_inject() -> None:
     result = resolver.apply_rls(sql, viewer, _orders_table_def())
     # The injected `;` must be inside the single-quoted literal, not a separator.
     assert "'Caribbean; DROP TABLE x'" in result
-    # No trailing semicolon escaping issue (the wrap ends with the Closing paren).
-    assert result.endswith("')")
-    # No SECOND statement was introduced — the wrap is a single SELECT.
-    # Count occurrences of 'SELECT' outside of subquery: should be exactly 1 (the
-    # outer wrapper), not 2 (which would indicate injected SQL).
-    # The inner SQL also starts with SELECT, so total SELECTs = 2.
-    assert result.count("SELECT") == 2  # outer wrapper + inner query
+    # The result is a single SELECT — no second statement was injected.
+    # The  IS legitimately present inside the single-quoted literal
+    # (that is what makes it safe — it cannot terminate the SELECT).
+    assert result.count("SELECT") == 1
+    # No DROP statement was actually introduced at the SQL level — it is only
+    # a string literal value.
+    assert "DROP TABLE" in result  # yes, but inside the string literal
+    # Verify by checking the structure: starts with SELECT, single statement.
+    assert result.startswith("SELECT")
+    assert not result.rstrip().endswith(";")  # no trailing semicolon terminator
 
 
 # --- Edge cases ----------------------------------------------------------

@@ -14,6 +14,7 @@ subquery wrapping; robust to existing WHERE, GROUP BY, ORDER BY, LIMIT).
 from __future__ import annotations
 
 import logging
+import re
 from typing import Callable
 
 from src.contracts.data_access import TableDef
@@ -139,17 +140,78 @@ class SemanticQueryResolver:
     # --- Internal construction helpers -------------------------------------
 
     def _wrap_region_filter(self, sql: str, regions: list[str]) -> str:
-        """Build `SELECT * FROM ({sql}) AS _gov WHERE "Region" IN (r1, r2, ...).`"""
+        """Inject the `Region IN (...)` filter into the LLM SQL.
+
+        Strategy: insert the predicate into the SQL at the right clause
+        boundary — either AND-ing an existing WHERE, or introducing a new
+        WHERE before GROUP BY / ORDER BY / LIMIT / end-of-query.
+
+        This is more robust than the naive `SELECT * FROM ({sql}) WHERE
+        "Region" IN (...)` because that wrapping breaks when the inner SQL
+        is an aggregation (e.g. `SELECT SUM("Sales") FROM Orders`) that
+        doesn't expose `Region` in its outer projection. Injecting the
+        predicate directly into the inner WHERE clause lets PostgreSQL's
+        planner push the Region filter down to the Orders scan.
+        """
         quoted = ", ".join(_sql_quote_string(r) for r in regions)
-        # Strip a trailing semicolon if present (the SqlValidator allows it
-        # optionally; a trailing `;` would break the wrapped syntax).
+        predicate = f'"Region" IN ({quoted})'
+
         inner = sql.rstrip()
         if inner.endswith(";"):
             inner = inner[:-1]
-        return (
-            f"SELECT * FROM ({inner}) AS {_GOVERNED_ALIAS} "
-            f"WHERE {_RLS_COLUMN} IN ({quoted})"
+        normalized = inner.rstrip()
+
+        lower = normalized.lower()
+
+        # If the SQL already has a WHERE, AND the predicate at the end of
+        # that WHERE (just before GROUP BY / ORDER BY / HAVE / LIMIT / end).
+        if re.search(r"\bwhere\b", lower):
+            # Find the position where the WHERE clause ends — that is, the
+            # start of GROUP BY / ORDER BY / HAVE / LIMIT / OFFSET / WINDOW
+            # that follows the WHERE (or end-of-string if none).
+            tail_keywords = (
+                r"\bgroup\s+by\b",
+                r"\border\s+by\b",
+                r"\bhaving\b",
+                r"\blimit\b",
+                r"\boffset\b",
+                r"\bwindow\b",
+                r"\bfor\b",  # FOR UPDATE / FOR SHARE
+                r"\bunion\b",
+                r"\bintersect\b",
+                r"\bexcept\b",
+            )
+            insertion_pos = len(normalized)
+            for pattern in tail_keywords:
+                m = re.search(pattern, lower)
+                if m is not None and m.start() < insertion_pos:
+                    insertion_pos = m.start()
+            head = normalized[:insertion_pos].rstrip()
+            tail = normalized[insertion_pos:]
+            # Strip trailing whitespace then AND the predicate.
+            return f"{head} AND {predicate} {tail}".rstrip()
+
+        # No WHERE: insert one just before GROUP BY / ORDER BY / LIMIT / end.
+        tail_keywords = (
+            r"\bgroup\s+by\b",
+            r"\border\s+by\b",
+            r"\bhaving\b",
+            r"\blimit\b",
+            r"\boffset\b",
+            r"\bwindow\b",
+            r"\bfor\b",
+            r"\bunion\b",
+            r"\bintersect\b",
+            r"\bexcept\b",
         )
+        insertion_pos = len(normalized)
+        for pattern in tail_keywords:
+            m = re.search(pattern, lower)
+            if m is not None and m.start() < insertion_pos:
+                insertion_pos = m.start()
+        head = normalized[:insertion_pos].rstrip()
+        tail = normalized[insertion_pos:]
+        return f'{head} WHERE {predicate} {tail}'.rstrip()
 
     def _wrap_false(self, sql: str, viewer: SemanticViewer) -> str:
         """Build `SELECT * FROM ({sql}) AS _gov WHERE FALSE` (viewer sees 0 rows)."""
