@@ -316,16 +316,36 @@ def cmd_generate_dictionary(source_file: str | None = None) -> None:
     _info("Done.")
 
 
-def cmd_ask(question: str) -> None:
+def cmd_ask(
+    question: str,
+    viewer_id: str | None = None,
+    allow_full_access: bool = False,
+) -> None:
     """ask: translate a natural-language question to SQL and return results.
 
     Builds the Text-to-SQL pipeline (prompt → LLM → validate → execute) and
     prints the generated SQL, validation status, and result rows.
     Fail-fast (FR-013) if FORGE_API_KEY is missing or the warehouse is not running.
+
+    v2.0 (feature 003-semantic-layer-v1):
+      - Requires a `--viewer <id>` (constitution Principle IV — governance is
+        non-negotiable). Without a viewer, fails fast unless `--allow-full-access`
+        is passed in a local/dev environment.
+      - Wires the `GovernedQueryProvider` decorator around the PG adapter so
+        RLS is enforced on every executed query.
+      - When the Semantic Layer artifact exists at `.artifacts/semantic_layer.json`,
+        loads it and passes it to the pipeline so the prompt includes metrics.
     """
     from src.ai_engineering.llm_client import LlmClient
     from src.ai_engineering.pipeline import TextToSqlPipeline
+    from src.contracts.semantic_layer import SemanticViewer
     from src.contracts.text_to_sql import LlmConfig, NLQuestion
+    from src.data_engineering.semantic_layer.builder import SemanticLayerBuilder
+    from src.data_engineering.semantic_layer.governed_provider import (
+        build_governed_provider,
+    )
+    from src.data_engineering.semantic_layer.registry import ViewerRegistry
+    from src.data_engineering.semantic_layer.resolver import SemanticQueryResolver
 
     # --- Fail-fast checks (FR-013) ---
     try:
@@ -337,6 +357,44 @@ def cmd_ask(question: str) -> None:
         _err("Docker is not running. Run `bootstrap` first to start the warehouse.")
 
     config = PostgresConfig.from_env()
+
+    # --- Resolve the viewer (governance context) ---
+    viewer: SemanticViewer | None = None
+    if viewer_id is not None:
+        try:
+            viewer = ViewerRegistry().get_viewer(viewer_id)
+        except FileNotFoundError as exc:
+            _err(str(exc))
+        except ValueError as exc:
+            _err(str(exc))
+        _info(
+            f"Loaded viewer {viewer_id!r}: regions={list(viewer.regions)} "
+            f"allows_full_access={viewer.allows_full_access}"
+        )
+    elif allow_full_access:
+        # `--allow-full-access` without --viewer: build an ad-hoc full-access viewer.
+        # Only effective in local/dev (the registry enforces is_local_dev gating).
+        import os
+
+        env = os.environ.get("ENV", "").strip().lower()
+        if env not in {"local", "dev", "test"}:
+            _err(
+                "--allow-full-access without --viewer is only honored in local/dev/test "
+                f"(got ENV={env!r}). Set a real viewer via --viewer <id>."
+            )
+        viewer = SemanticViewer(
+            viewer_id="full_access_local_dev",
+            regions=[],
+            allows_full_access=True,
+            is_local_dev=True,
+        )
+        _info("WARNING: running in full-access mode (no RLS). Only for local/dev.")
+    else:
+        _err(
+            "Governance is non-negotiable (constitution Principle IV). "
+            "Provide --viewer <id> (see viewers.example.yaml) or, in local/dev, "
+            "--allow-full-access."
+        )
 
     # --- Build the pipeline ---
     src_path = _DEFAULT_SOURCE
@@ -362,16 +420,56 @@ def cmd_ask(question: str) -> None:
 
     document = generate_dictionary(inference, table_defs)
 
+    # --- Optional: load the Semantic Layer artifact for prompt enrichment (US3) ---
+    semantic_doc = None
+    if _SEMANTIC_LAYER_JSON_PATH.exists():
+        try:
+            import json
+
+            payload = json.loads(_SEMANTIC_LAYER_JSON_PATH.read_text())
+            from src.contracts.semantic_layer import SemanticLayerDocument
+
+            # `generated_at` is excluded from the canonical JSON; supply a
+            # placeholder so the model validates (it's not used at runtime).
+            payload.setdefault("generated_at", datetime.now(timezone.utc).isoformat())
+            semantic_doc = SemanticLayerDocument.model_validate(payload)
+            _info(f"Loaded Semantic Layer artifact from {_SEMANTIC_LAYER_JSON_PATH}")
+        except Exception as exc:
+            _info(
+                f"WARNING: could not load Semantic Layer artifact ({exc}); "
+                "continuing without semantic enrichment."
+            )
+            semantic_doc = None
+    else:
+        # Build on the fly if the artifact doesn't exist (best-effort).
+        try:
+            builder = SemanticLayerBuilder()
+            semantic_doc = builder.build(
+                dictionary=document,
+                semantic_source_sha256=sha256_of_file(_SEMANTIC_SOURCE_PATH),
+                source_sha256=source_sha,
+            )
+        except Exception as exc:
+            _info(f"WARNING: could not build Semantic Layer on the fly ({exc}).")
+
     llm_client = LlmClient(llm_config)
 
-    # --- Run the pipeline ---
+    # --- Run the pipeline with a GovernedQueryProvider (RLS enforced) ---
     with PostgresRepository(config=config) as repo:
+        query_provider = build_governed_provider(
+            delegate=repo,
+            resolver=SemanticQueryResolver(),
+            viewer=viewer,
+            table_def=orders_def,  # type: ignore[arg-type]  # confirmed non-None above
+        )
         pipeline = TextToSqlPipeline(
             dictionary=document,
             table_def=orders_def,  # type: ignore[arg-type]  # confirmed non-None above
             llm_client=llm_client,
-            query_provider=repo,
+            query_provider=query_provider,
             llm_config=llm_config,
+            semantic_layer=semantic_doc,
+            viewer=viewer,
         )
         response = pipeline.run(NLQuestion(text=question))
 
@@ -381,6 +479,7 @@ def cmd_ask(question: str) -> None:
         sys.exit(1)
 
     print(f"Question: {response.question.text}")
+    print(f"Viewer: {viewer_id or 'full_access_local_dev'} (regions: {list(viewer.regions)})")
     print(f"Generated SQL: {response.generated_sql.sql}")
     print(f"Validation: {'ACCEPTED' if response.validation.accepted else 'REJECTED'}")
     if response.validation.reason:
@@ -573,11 +672,28 @@ def main(argv: list[str] | None = None) -> None:
         cmd_generate_semantic_layer()
         return
     if command == "ask":
-        if not rest:
-            _err("Usage: python -m src.cli.main ask <question>")
-        # Join remaining args into a single question string.
-        question_text = " ".join(rest)
-        cmd_ask(question_text)
+        # Parse v2.0 flags: --viewer <id> and --allow-full-access.
+        # Any remaining non-flag token is part of the question (joined).
+        viewer_id: str | None = None
+        allow_full = False
+        question_tokens: list[str] = []
+        i = 0
+        while i < len(rest):
+            tok = rest[i]
+            if tok in ("--viewer", "-v") and i + 1 < len(rest):
+                viewer_id = rest[i + 1]
+                i += 2
+                continue
+            if tok == "--allow-full-access":
+                allow_full = True
+                i += 1
+                continue
+            question_tokens.append(tok)
+            i += 1
+        if not question_tokens:
+            _err("Usage: python -m src.cli.main ask <question> [--viewer <id>]")
+        question_text = " ".join(question_tokens)
+        cmd_ask(question_text, viewer_id=viewer_id, allow_full_access=allow_full)
         return
     if command == "evaluate":
         cmd_evaluate()

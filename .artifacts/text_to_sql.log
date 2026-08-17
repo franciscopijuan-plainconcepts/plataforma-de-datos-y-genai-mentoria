@@ -3,3 +3,4 @@
 [2026-08-11T12:08:15.981925+00:00] question='What is the total sales amount?' sql='SELECT SUM("Sales") FROM "Orders";' accepted=True reason='' rows=1 error='' latency_ms=21
 [2026-08-14T09:41:17.573623+00:00] question='What is the total sales amount?' sql='SELECT SUM("Sales") FROM "Orders";' accepted=True reason='' rows=1 error='' latency_ms=13
 [2026-08-14T10:09:03.063201+00:00] question='What is the total sales amount?' sql='SELECT SUM("Sales") FROM "Orders";' accepted=True reason='' rows=1 error='' latency_ms=135
+[2026-08-17T11:37:07.101831+00:00] question='total sales' sql='SELECT SUM("Sales") FROM "Orders"' accepted=True reason='' rows=0 error='column "Region" does not exist\nLINE 1: ...(SELECT SUM("Sales") FROM "Orders") AS _gov WHERE "Region" I...\n                                                             ^' latency_ms=13 viewer_id=alice regions=['Caribbean', 'Central America'] gov_bypass=False
