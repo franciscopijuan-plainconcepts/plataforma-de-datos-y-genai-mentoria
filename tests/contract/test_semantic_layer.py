@@ -263,3 +263,148 @@ def test_resolver_protocol_rejects_missing_apply_rls() -> None:
             ...
 
     assert not isinstance(_MissingMethod(), SemanticQueryResolverProtocol)
+
+
+# ---------------------------------------------------------------------------
+# T019: GovernedQueryProvider contract tests (v2.0 RLS enforcement decorator)
+# ---------------------------------------------------------------------------
+
+def test_governed_query_provider_satisfies_query_provider_protocol() -> None:
+    """FR-012: `GovernedQueryProvider` implements the `QueryProvider` Protocol.
+
+    So the `TextToSqlPipeline` (002) can be wired to either a raw adapter or
+    a governed wrapper transparently.
+    """
+    from src.contracts.semantic_layer import SemanticViewer
+    from src.contracts.data_access import ColumnDef, LogicalType, TableDef
+    from src.data_access.interfaces import QueryProvider
+    from src.data_engineering.semantic_layer.governed_provider import (
+        GovernedQueryProvider,
+    )
+    from src.data_engineering.semantic_layer.resolver import SemanticQueryResolver
+
+    # Minimal stub delegate (structurally a QueryProvider).
+    class _StubDelegate:
+        def execute_readonly_query(self, sql: str, table_def: TableDef) -> list:
+            return []
+
+    table_def = TableDef(
+        name="Orders",
+        columns=[ColumnDef(name="Region", logical_type=LogicalType.STRING,
+                            max_length=50, nullable=False)],
+        description="Orders.",
+    )
+    viewer = SemanticViewer(viewer_id="alice", regions=["Caribbean"])
+    provider = GovernedQueryProvider(
+        delegate=_StubDelegate(),
+        resolver=SemanticQueryResolver(),
+        viewer=viewer,
+        table_def=table_def,
+    )
+    assert isinstance(provider, QueryProvider)
+
+
+def test_governed_query_provider_calls_resolver_then_delegates() -> None:
+    """The decorator MUST call `apply_rls` once before delegating execution.
+
+    Constitution Principle IV: governance is non-negotiable. The governed
+    provider MUST NOT bypass the resolver.
+    """
+    from src.contracts.semantic_layer import SemanticViewer
+    from src.contracts.data_access import ColumnDef, LogicalType, TableDef
+    from src.data_engineering.semantic_layer.governed_provider import (
+        GovernedQueryProvider,
+    )
+    from src.data_engineering.semantic_layer.resolver import SemanticQueryResolver
+
+    class _RecorderDelegate:
+        def __init__(self) -> None:
+            self.received_sql: str | None = None
+            self.calls: int = 0
+
+        def execute_readonly_query(self, sql: str, table_def: TableDef) -> list:
+            self.calls += 1
+            self.received_sql = sql
+            return []
+
+    table_def = TableDef(
+        name="Orders",
+        columns=[ColumnDef(name="Region", logical_type=LogicalType.STRING,
+                            max_length=50, nullable=False)],
+        description="Orders.",
+    )
+    delegate = _RecorderDelegate()
+    viewer = SemanticViewer(viewer_id="alice", regions=["Caribbean"])
+    provider = GovernedQueryProvider(
+        delegate=delegate,
+        resolver=SemanticQueryResolver(),
+        viewer=viewer,
+        table_def=table_def,
+    )
+    provider.execute_readonly_query('SELECT * FROM Orders', table_def)
+    # Delegate was called exactly once.
+    assert delegate.calls == 1
+    # The delegated SQL contains the RLS wrap (apply_rls ran).
+    assert delegate.received_sql is not None
+    assert '"Region" IN' in delegate.received_sql
+    assert "_gov" in delegate.received_sql
+
+
+def test_ungoverned_fail_fast_provider_raises_on_query() -> None:
+    """FR-019: a pipeline without a viewer MUST fail-fast, never silently bypass RLS."""
+    from src.contracts.data_access import ColumnDef, LogicalType, TableDef
+    from src.data_engineering.semantic_layer.governed_provider import (
+        build_governed_provider,
+    )
+    from src.data_engineering.semantic_layer.resolver import SemanticQueryResolver
+
+    class _StubDelegate:
+        def execute_readonly_query(self, sql: str, table_def: TableDef) -> list:
+            return []
+
+    table_def = TableDef(
+        name="Orders",
+        columns=[ColumnDef(name="Region", logical_type=LogicalType.STRING,
+                            max_length=50, nullable=False)],
+        description="Orders.",
+    )
+    provider = build_governed_provider(
+        delegate=_StubDelegate(),
+        resolver=SemanticQueryResolver(),
+        viewer=None,
+        table_def=table_def,
+    )
+    import pytest
+
+    with pytest.raises(ValueError, match="Governance is non-negotiable"):
+        provider.execute_readonly_query('SELECT * FROM Orders', table_def)
+
+
+def test_build_governed_provider_returns_governed_when_viewer_present() -> None:
+    """Composition root: build_governed_provider returns GovernedQueryProvider with viewer."""
+    from src.contracts.semantic_layer import SemanticViewer
+    from src.contracts.data_access import ColumnDef, LogicalType, TableDef
+    from src.data_engineering.semantic_layer.governed_provider import (
+        GovernedQueryProvider,
+        build_governed_provider,
+    )
+    from src.data_engineering.semantic_layer.resolver import SemanticQueryResolver
+
+    class _StubDelegate:
+        def execute_readonly_query(self, sql: str, table_def: TableDef) -> list:
+            return []
+
+    table_def = TableDef(
+        name="Orders",
+        columns=[ColumnDef(name="Region", logical_type=LogicalType.STRING,
+                            max_length=50, nullable=False)],
+        description="Orders.",
+    )
+    viewer = SemanticViewer(viewer_id="alice", regions=["Caribbean"])
+    provider = build_governed_provider(
+        delegate=_StubDelegate(),
+        resolver=SemanticQueryResolver(),
+        viewer=viewer,
+        table_def=table_def,
+    )
+    assert isinstance(provider, GovernedQueryProvider)
