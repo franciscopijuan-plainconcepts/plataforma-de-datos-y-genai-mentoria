@@ -40,6 +40,7 @@ _ALLOWED_PANDAS_DIRS = {
     _REPO_ROOT / "src" / "data_engineering" / "ingestion",
 }
 _ALLOWED_PSYCOPG_DIR = _REPO_ROOT / "src" / "data_access" / "adapters" / "postgres"
+_ALLOWED_OPENAI_DIR = _REPO_ROOT / "src" / "ai_engineering"
 
 
 def _iter_python_files(root: Path) -> list[Path]:
@@ -135,7 +136,36 @@ def test_psycopg_confined_to_postgres_adapter() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Boundary 3: runtime_checkable Protocol conformance
+# Boundary 3: openai confined to ai_engineering
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize(
+    "guarded_module",
+    ["openai", "httpx"],
+)
+def test_openai_confined_to_ai_engineering(guarded_module: str) -> None:
+    """`openai`/`httpx` MUST NOT be imported outside the AI Engineering domain.
+
+    Constitution Principle II & III: the OpenAI SDK (and its httpx dependency)
+    is confined to `src/ai_engineering/` so no other domain imports the LLM
+    client directly.
+    """
+    src_root = _REPO_ROOT / "src"
+    offenders: list[str] = []
+    for py_file in _iter_python_files(src_root):
+        if guarded_module not in _top_level_modules(py_file):
+            continue
+        if _is_under(py_file, {_ALLOWED_OPENAI_DIR}):
+            continue  # permitted location
+        offenders.append(str(py_file.relative_to(_REPO_ROOT)))
+    assert not offenders, (
+        f"{guarded_module} imported outside the AI Engineering domain: {offenders}. "
+        f"Only {_ALLOWED_OPENAI_DIR} may import openai/httpx."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Boundary 4: runtime_checkable Protocol conformance
 # ---------------------------------------------------------------------------
 
 def test_postgres_repository_satisfies_protocols() -> None:

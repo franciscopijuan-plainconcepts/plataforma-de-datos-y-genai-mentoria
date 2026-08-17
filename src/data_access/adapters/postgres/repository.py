@@ -28,6 +28,7 @@ from src.contracts.data_access import (
     Row,
     TableDef,
 )
+from src.contracts.text_to_sql import QueryRow
 from src.data_access.adapters.postgres.connection import (
     DictConnection,
     PostgresConfig,
@@ -222,6 +223,30 @@ class PostgresRepository:
             )
             rows = cur.fetchall()
         return [str(r["tablename"]) for r in rows if r is not None]
+
+    # --- QueryProvider ---
+
+    def execute_readonly_query(
+        self, sql: str, table_def: TableDef
+    ) -> list[QueryRow]:
+        """Execute a validated read-only SELECT and return typed rows.
+
+        The caller MUST validate the SQL via `SqlValidator` before calling
+        this method. The adapter executes the query as-is (the SQL is already
+        confirmed to be a single SELECT on the specified table) and maps each
+        result row to a `QueryRow` model.
+
+        Per FR-009/FR-010: raw dicts never cross the boundary — each row is
+        converted to a `QueryRow` before returning.
+        """
+        with self._conn.cursor() as cur:
+            cur.execute(sql)  # validated SELECT, safe to execute directly
+            raw_rows = cur.fetchall()
+        return [
+            QueryRow(data={k: v for k, v in dict(r).items() if v is not None})
+            for r in raw_rows
+            if r is not None
+        ]
 
     # --- Connection lifecycle ---
 

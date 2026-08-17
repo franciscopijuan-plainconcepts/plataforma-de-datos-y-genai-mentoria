@@ -26,6 +26,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from dotenv import load_dotenv
+
 from src.contracts.ingestion import SchemaInferenceResult
 from src.data_access.adapters.postgres.connection import PostgresConfig
 from src.data_access.adapters.postgres.repository import PostgresRepository
@@ -40,7 +42,6 @@ from src.data_engineering.ingestion.manifest import (
     write_manifest,
 )
 
-
 # --- Repository root + file paths ---
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _COMPOSE_FILE = _REPO_ROOT / "docker" / "docker-compose.yml"
@@ -49,6 +50,10 @@ _MANIFEST_PATH = _REPO_ROOT / ".artifacts" / "load_manifest.json"
 _DICTIONARY_PATH = _REPO_ROOT / "data_dictionary.md"
 # Expected row counts from the EDA (see research.md Part A) — the validator
 # uses these to confirm the loaded warehouse matches the canonical dataset.
+
+# Load .env from the repository root so FORGE_API_KEY and POSTGRES_* are
+# available without manually sourcing .env. Safe if .env doesn't exist.
+load_dotenv(_REPO_ROOT / ".env")
 _EXPECTED_ROW_COUNTS = {
     "Orders": 51290,
     "Returns": 2033,
@@ -307,11 +312,159 @@ def cmd_generate_dictionary(source_file: str | None = None) -> None:
     _info("Done.")
 
 
+def cmd_ask(question: str) -> None:
+    """ask: translate a natural-language question to SQL and return results.
+
+    Builds the Text-to-SQL pipeline (prompt → LLM → validate → execute) and
+    prints the generated SQL, validation status, and result rows.
+    Fail-fast (FR-013) if FORGE_API_KEY is missing or the warehouse is not running.
+    """
+    from src.ai_engineering.llm_client import LlmClient
+    from src.ai_engineering.pipeline import TextToSqlPipeline
+    from src.contracts.text_to_sql import LlmConfig, NLQuestion
+
+    # --- Fail-fast checks (FR-013) ---
+    try:
+        llm_config = LlmConfig.from_env()
+    except ValueError as exc:
+        _err(str(exc))
+
+    if not _docker_available():
+        _err("Docker is not running. Run `bootstrap` first to start the warehouse.")
+
+    config = PostgresConfig.from_env()
+
+    # --- Build the pipeline ---
+    src_path = _DEFAULT_SOURCE
+    if not src_path.exists():
+        _err(f"Source workbook not found: {src_path}")
+
+    _info("Exploring workbook for semantic context...")
+    tables, shared = explore_workbook(src_path)
+    source_sha = sha256_of_file(src_path)
+    inference = SchemaInferenceResult(
+        source_file=str(src_path),
+        source_sha256=source_sha,
+        tables=tables,
+        shared_columns=shared,
+        inferred_at=datetime.now(timezone.utc),
+    )
+    table_defs = infer_table_defs(tables)
+    orders_def = next(
+        (td for td in table_defs if td.name.lower() == "orders"), None
+    )
+    if orders_def is None:
+        _err("Orders table not found in inferred schema.")
+
+    document = generate_dictionary(inference, table_defs)
+
+    llm_client = LlmClient(llm_config)
+
+    # --- Run the pipeline ---
+    with PostgresRepository(config=config) as repo:
+        pipeline = TextToSqlPipeline(
+            dictionary=document,
+            table_def=orders_def,  # type: ignore[arg-type]  # confirmed non-None above
+            llm_client=llm_client,
+            query_provider=repo,
+            llm_config=llm_config,
+        )
+        response = pipeline.run(NLQuestion(text=question))
+
+    # --- Print results ---
+    if response.error:
+        print(f"Error: {response.error}")
+        sys.exit(1)
+
+    print(f"Question: {response.question.text}")
+    print(f"Generated SQL: {response.generated_sql.sql}")
+    print(f"Validation: {'ACCEPTED' if response.validation.accepted else 'REJECTED'}")
+    if response.validation.reason:
+        print(f"  Reason: {response.validation.reason}")
+
+    if response.query_result is not None:
+        if response.query_result.error:
+            print(f"Execution error: {response.query_result.error}")
+            print(f"  SQL: {response.query_result.sql}")
+        else:
+            print(f"Rows ({response.query_result.row_count}):")
+            for row in response.query_result.rows:
+                print(f"  {row.data}")
+            print(f"Latency: {response.query_result.latency_ms}ms")
+
+
+def cmd_evaluate() -> None:
+    """evaluate: run the sanity-check evaluation (v1.1).
+
+    Runs ~10 sample questions through the full Text-to-SQL pipeline and prints
+    a simple pass/fail summary (FR-017/SC-002). Requires Docker PG + FORGE_API_KEY.
+    """
+    from src.ai_engineering.evaluation import run_evaluation
+    from src.ai_engineering.llm_client import LlmClient
+    from src.ai_engineering.pipeline import TextToSqlPipeline
+    from src.contracts.text_to_sql import LlmConfig
+
+    # --- Fail-fast checks (FR-013) ---
+    try:
+        llm_config = LlmConfig.from_env()
+    except ValueError as exc:
+        _err(str(exc))
+
+    if not _docker_available():
+        _err("Docker is not running. Run `bootstrap` first to start the warehouse.")
+
+    config = PostgresConfig.from_env()
+
+    # --- Build the pipeline (same as cmd_ask) ---
+    src_path = _DEFAULT_SOURCE
+    if not src_path.exists():
+        _err(f"Source workbook not found: {src_path}")
+
+    _info("Exploring workbook for semantic context...")
+    tables, shared = explore_workbook(src_path)
+    source_sha = sha256_of_file(src_path)
+    inference = SchemaInferenceResult(
+        source_file=str(src_path),
+        source_sha256=source_sha,
+        tables=tables,
+        shared_columns=shared,
+        inferred_at=datetime.now(timezone.utc),
+    )
+    table_defs = infer_table_defs(tables)
+    orders_def = next(
+        (td for td in table_defs if td.name.lower() == "orders"), None
+    )
+    if orders_def is None:
+        _err("Orders table not found in inferred schema.")
+
+    document = generate_dictionary(inference, table_defs)
+    llm_client = LlmClient(llm_config)
+
+    sample_path = _REPO_ROOT / "specs" / "002-text-to-sql-v1" / "sample_questions.json"
+    if not sample_path.exists():
+        _err(f"Sample questions file not found: {sample_path}")
+
+    _info("Running sanity-check evaluation...")
+    with PostgresRepository(config=config) as repo:
+        pipeline = TextToSqlPipeline(
+            dictionary=document,
+            table_def=orders_def,  # type: ignore[arg-type]  # confirmed non-None above
+            llm_client=llm_client,
+            query_provider=repo,
+            llm_config=llm_config,
+        )
+        summary = run_evaluation(pipeline, sample_path)
+
+    print(summary)
+
+
 _COMMANDS = {
     "bootstrap": cmd_bootstrap,
     "teardown": cmd_teardown,
     "validate": cmd_validate,
     "generate-dictionary": None,  # has special arg handling in main()
+    "ask": None,  # has special arg handling in main()
+    "evaluate": None,  # has special arg handling in main()
 }
 
 
@@ -325,6 +478,8 @@ def main(argv: list[str] | None = None) -> None:
         print("  teardown [--remove-volume]        Stop & remove container (and optionally volume)")
         print("  validate                          Single pass/fail health check")
         print("  generate-dictionary [--source P]  Generate data_dictionary.md from the schema")
+        print("  ask <question>                     Translate a natural-language question to SQL")
+        print("  evaluate                           Run sanity-check evaluation (v1.1)")
         sys.exit(0 if args else 1)
 
     command = args[0]
@@ -335,6 +490,16 @@ def main(argv: list[str] | None = None) -> None:
             if a in ("--source", "-s") and i + 1 < len(rest):
                 dict_source = rest[i + 1]
         cmd_generate_dictionary(source_file=dict_source)
+        return
+    if command == "ask":
+        if not rest:
+            _err("Usage: python -m src.cli.main ask <question>")
+        # Join remaining args into a single question string.
+        question_text = " ".join(rest)
+        cmd_ask(question_text)
+        return
+    if command == "evaluate":
+        cmd_evaluate()
         return
     handler = _COMMANDS.get(command)
     if handler is None:

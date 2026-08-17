@@ -1,0 +1,52 @@
+[
+  {
+    "id": "q01",
+    "question": "What is the total sales amount?",
+    "expected_sql_normalized": "select sum(\"sales\") from orders"
+  },
+  {
+    "id": "q02",
+    "question": "Show me the total sales by region",
+    "expected_sql_normalized": "select \"region\", sum(\"sales\") from orders group by \"region\""
+  },
+  {
+    "id": "q03",
+    "question": "What are the top 5 products by profit?",
+    "expected_sql_normalized": "select \"product name\", sum(\"profit\") from orders group by \"product name\" order by sum(\"profit\") desc limit 5"
+  },
+  {
+    "id": "q04",
+    "question": "How many orders are there?",
+    "expected_sql_normalized": "select count(*) from orders"
+  },
+  {
+    "id": "q05",
+    "question": "What is the average sales amount?",
+    "expected_sql_normalized": "select avg(\"sales\") from orders"
+  },
+  {
+    "id": "q06",
+    "question": "¿Cuál es el total de ventas por región?",
+    "expected_sql_normalized": "select \"region\", sum(\"sales\") from orders group by \"region\""
+  },
+  {
+    "id": "q07",
+    "question": "Show me orders where profit is negative",
+    "expected_sql_normalized": "select * from orders where \"profit\" < 0"
+  },
+  {
+    "id": "q08",
+    "question": "What is the total quantity sold?",
+    "expected_sql_normalized": "select sum(\"quantity\") from orders"
+  },
+  {
+    "id": "q09",
+    "question": "Show me sales by category",
+    "expected_sql_normalized": "select \"category\", sum(\"sales\") from orders group by \"category\""
+  },
+  {
+    "id": "q10",
+    "question": "¿Cuántos pedidos hay en total?",
+    "expected_sql_normalized": "select count(*) from orders"
+  }
+]

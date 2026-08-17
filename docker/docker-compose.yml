@@ -12,18 +12,18 @@ services:
     restart: unless-stopped
     environment:
       # Externalized — values come from .env (see .env.example). FR-006.
-      POSTGRES_USER: ${POSTGRES_USER:-plataforma}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-plataforma_dev}
-      POSTGRES_DB: ${POSTGRES_DB:-global_superstore}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
     ports:
       # Configurable host port (override via .env) to avoid collisions. FR-006.
-      - "${POSTGRES_PORT:-5432}:5432"
+      - "${POSTGRES_PORT}:5432"
     volumes:
       # Named volume for optional persistence (teardown may remove it). FR-007.
       - plataforma_pgdata:/var/lib/postgresql/data
     healthcheck:
       # Used by the bootstrap command to wait for readiness. FR-013.
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-plataforma} -d ${POSTGRES_DB:-global_superstore}"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
       interval: 5s
       timeout: 5s
       retries: 10

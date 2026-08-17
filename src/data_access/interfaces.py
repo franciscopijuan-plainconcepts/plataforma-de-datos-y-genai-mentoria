@@ -24,6 +24,7 @@ from __future__ import annotations
 from typing import Protocol, runtime_checkable
 
 from src.contracts.data_access import LoadResult, OrderRow, Row, TableDef
+from src.contracts.text_to_sql import QueryRow
 
 
 @runtime_checkable
@@ -85,11 +86,31 @@ class DataProvider(Protocol):
 
 @runtime_checkable
 class QueryProvider(Protocol):
-    """Reserved typed-query contract for the future Text-to-SQL layer (v1.0/1.1).
+    """Typed-query contract for the Text-to-SQL layer (v1.0/1.1).
 
-    Intentionally empty at this baseline. When added, methods will be semantic
-    and always typed — never a raw `execute_sql(sql: str)` escape hatch.
+    This Protocol carries `execute_readonly_query` — a purpose-built read-only
+    method that accepts pre-validated SELECT SQL and returns typed `QueryRow`
+    models. This is NOT a generic `execute_sql(sql: str)` escape hatch (see
+    research.md Part C): the caller MUST validate the SQL via `SqlValidator`
+    before calling this method, and the method name signals the read-only
+    semantic contract.
     """
 
-    # No methods at this baseline. Methods will be added per the Text-to-SQL
-    # v1.0/1.1 feature spec.
+    def execute_readonly_query(
+        self, sql: str, table_def: TableDef
+    ) -> list[QueryRow]:
+        """Execute a validated read-only SELECT query and return typed rows.
+
+        The caller MUST validate the SQL before calling this method (the
+        `SqlValidator` accepts only single SELECT statements on the
+        specified table). The adapter executes the query and maps each result
+        row to a `QueryRow` model (typed, not raw dict).
+
+        Args:
+            sql: A validated single SELECT statement.
+            table_def: The `TableDef` of the queried table (for column mapping).
+
+        Returns:
+            A list of `QueryRow` models.
+        """
+        ...
