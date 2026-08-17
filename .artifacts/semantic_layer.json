@@ -1,0 +1,214 @@
+{
+  "assumptions": [
+    "returned_amount: A line is considered returned if at least one Returns row matches its Order ID. Because Returns.\"Order ID\" has duplicates (multi-line returns), EXISTS is used instead of JOIN to avoid inflating rows.",
+    "net_profit: Proportionally discounts total_profit by the fraction of sales that was returned (returned_amount / gross_sales * total_profit). Assumes returned lines have no independent profit record; a more precise subquery-based formula is documented for v3.0+."
+  ],
+  "dimensions": [
+    {
+      "business_description": "Geographic region of the order. Shared with Returns and People — the basis for RLS.",
+      "column": "Region",
+      "dimension_type": "geographic",
+      "name": "region",
+      "source_table": "Orders"
+    },
+    {
+      "business_description": "Country of the delivery address.",
+      "column": "Country",
+      "dimension_type": "geographic",
+      "name": "country",
+      "source_table": "Orders"
+    },
+    {
+      "business_description": "Top-level market the order belongs to (Asia Pacific, Europe, Africa, LATAM, USCA).",
+      "column": "Market",
+      "dimension_type": "geographic",
+      "name": "market",
+      "source_table": "Orders"
+    },
+    {
+      "business_description": "Customer segment (consumer, corporate, home office).",
+      "column": "Segment",
+      "dimension_type": "categorical",
+      "name": "segment",
+      "source_table": "Orders"
+    },
+    {
+      "business_description": "Top-level product category (Furniture, Office Supplies, Technology).",
+      "column": "Category",
+      "dimension_type": "categorical",
+      "name": "category",
+      "source_table": "Orders"
+    },
+    {
+      "business_description": "Product sub-category (e.g., Binders, Chairs, Phones).",
+      "column": "Sub-Category",
+      "dimension_type": "categorical",
+      "name": "sub_category",
+      "source_table": "Orders"
+    },
+    {
+      "business_description": "Shipping class selected for the order.",
+      "column": "Ship Mode",
+      "dimension_type": "categorical",
+      "name": "ship_mode",
+      "source_table": "Orders"
+    },
+    {
+      "business_description": "Priority level of the order (Low, Medium, High, Critical).",
+      "column": "Order Priority",
+      "dimension_type": "categorical",
+      "name": "order_priority",
+      "source_table": "Orders"
+    },
+    {
+      "business_description": "Date the order was placed.",
+      "column": "Order Date",
+      "dimension_type": "temporal",
+      "name": "order_date",
+      "source_table": "Orders"
+    },
+    {
+      "business_description": "Name of the customer who placed the order.",
+      "column": "Customer Name",
+      "dimension_type": "categorical",
+      "name": "customer",
+      "source_table": "Orders"
+    },
+    {
+      "business_description": "Human-readable product name.",
+      "column": "Product Name",
+      "dimension_type": "categorical",
+      "name": "product",
+      "source_table": "Orders"
+    }
+  ],
+  "metrics": [
+    {
+      "aggregation": "SUM",
+      "business_description": "Gross sales revenue across all order lines, before subtracting any returned revenue.",
+      "derives_from": [],
+      "formula_sql": "SUM(\"Sales\")",
+      "name": "gross_sales",
+      "source_table": "Orders",
+      "uses_returns": false
+    },
+    {
+      "aggregation": "EXPRESSION",
+      "assumption": "A line is considered returned if at least one Returns row matches its Order ID. Because Returns.\"Order ID\" has duplicates (multi-line returns), EXISTS is used instead of JOIN to avoid inflating rows.",
+      "business_description": "Total sales revenue of order lines that were returned (have a matching entry in the Returns table by Order ID).",
+      "derives_from": [],
+      "formula_sql": "SUM(CASE WHEN EXISTS (SELECT 1 FROM Returns WHERE Returns.\"Order ID\" = Orders.\"Order ID\") THEN \"Sales\" ELSE 0 END)",
+      "name": "returned_amount",
+      "source_table": "Orders",
+      "uses_returns": true
+    },
+    {
+      "aggregation": "EXPRESSION",
+      "business_description": "Net sales revenue: gross sales minus returned order-line revenue.",
+      "derives_from": [
+        "gross_sales",
+        "returned_amount"
+      ],
+      "formula_sql": "SUM(CASE WHEN NOT EXISTS (SELECT 1 FROM Returns WHERE Returns.\"Order ID\" = Orders.\"Order ID\") THEN \"Sales\" ELSE 0 END)",
+      "name": "net_sales",
+      "source_table": "Orders",
+      "uses_returns": true
+    },
+    {
+      "aggregation": "RATIO",
+      "business_description": "Fraction of gross sales that was returned: returned_amount / gross_sales.",
+      "derives_from": [
+        "returned_amount",
+        "gross_sales"
+      ],
+      "formula_sql": "CASE WHEN SUM(\"Sales\") = 0 THEN NULL ELSE SUM(CASE WHEN EXISTS (SELECT 1 FROM Returns WHERE Returns.\"Order ID\" = Orders.\"Order ID\") THEN \"Sales\" ELSE 0 END) / SUM(\"Sales\") END",
+      "name": "return_rate",
+      "source_table": "Orders",
+      "uses_returns": true
+    },
+    {
+      "aggregation": "SUM",
+      "business_description": "Sum of signed profit across all order lines (negatives are losses).",
+      "derives_from": [],
+      "formula_sql": "SUM(\"Profit\")",
+      "name": "total_profit",
+      "source_table": "Orders",
+      "uses_returns": false
+    },
+    {
+      "aggregation": "EXPRESSION",
+      "assumption": "Proportionally discounts total_profit by the fraction of sales that was returned (returned_amount / gross_sales * total_profit). Assumes returned lines have no independent profit record; a more precise subquery-based formula is documented for v3.0+.",
+      "business_description": "Net profit: total profit minus the proportion of profit corresponding to returned order lines.",
+      "derives_from": [
+        "total_profit",
+        "returned_amount"
+      ],
+      "formula_sql": "SUM(\"Profit\") - (CASE WHEN SUM(\"Sales\") = 0 THEN 0 ELSE (SUM(CASE WHEN EXISTS (SELECT 1 FROM Returns WHERE Returns.\"Order ID\" = Orders.\"Order ID\") THEN \"Sales\" ELSE 0 END) / SUM(\"Sales\")) * SUM(\"Profit\") END)",
+      "name": "net_profit",
+      "source_table": "Orders",
+      "uses_returns": true
+    },
+    {
+      "aggregation": "EXPRESSION",
+      "business_description": "Average value of a distinct order: gross sales divided by the number of distinct Order IDs.",
+      "derives_from": [
+        "gross_sales"
+      ],
+      "formula_sql": "SUM(\"Sales\") / NULLIF(COUNT(DISTINCT \"Order ID\"), 0)",
+      "name": "avg_order_value",
+      "source_table": "Orders",
+      "uses_returns": false
+    },
+    {
+      "aggregation": "COUNT_DISTINCT",
+      "business_description": "Number of distinct orders (by Order ID).",
+      "derives_from": [],
+      "formula_sql": "COUNT(DISTINCT \"Order ID\")",
+      "name": "order_count",
+      "source_table": "Orders",
+      "uses_returns": false
+    }
+  ],
+  "relationships": [
+    {
+      "cardinality": "N:1",
+      "from_column": "Order ID",
+      "from_table": "Returns",
+      "join_type": "LEFT",
+      "name": "orders_to_returns",
+      "notes": "Returns.\"Order ID\" has 63 duplicate values across 2,033 rows (multi-line returns) — use EXISTS instead of direct JOIN to avoid inflating Orders rows.",
+      "to_column": "Order ID",
+      "to_table": "Orders"
+    },
+    {
+      "cardinality": "1:N",
+      "from_column": "Region",
+      "from_table": "People",
+      "join_type": "INNER",
+      "name": "orders_to_people_by_region",
+      "notes": "Taxonomy mismatch: People splits Canada into Eastern/Western Canada vs Orders' single Canada (23 unique). Resolution is v3.0+ scope; the resolver is conservative — a viewer scoped to 'Eastern Canada' sees 0 Orders rows.",
+      "to_column": "Region",
+      "to_table": "Orders"
+    }
+  ],
+  "semantic_source_sha256": "e40350ee0d0b56a3b8c0cf0323650ee6217c83a530e5045dfc9ea429fddd0bba",
+  "source_sha256": "d7a805f6cfd26339f478a3de6a6f128ea156179be093e09a1f528776fd5fdc3e",
+  "tables": [
+    {
+      "name": "Orders",
+      "purpose": "The transactional fact table of the Global Superstore Dataset: one row per order line, capturing sales, discount, profit, customer, product, and regional attributes. Central to the future v1.0/1.1 Text-to-SQL scope (primary query surface) and the v2.0 Semantic Layer (gross/net sales).",
+      "table_type": "fact"
+    },
+    {
+      "name": "Returns",
+      "purpose": "Records which orders were returned. Linked to Orders via Order ID. Used in v2.0 to model business logic distinguishing net vs gross sales (a returned order's sales are subtracted from gross to compute net).",
+      "table_type": "fact"
+    },
+    {
+      "name": "People",
+      "purpose": "Mapping of regional sales people / managers to the regions they govern. The basis for future v2.0 Row-Level Security: a user may only query data for regions assigned to them.",
+      "table_type": "governance_mapping"
+    }
+  ],
+  "version": "1.0.0"
+}

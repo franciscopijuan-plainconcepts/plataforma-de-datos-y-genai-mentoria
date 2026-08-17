@@ -48,6 +48,10 @@ _COMPOSE_FILE = _REPO_ROOT / "docker" / "docker-compose.yml"
 _DEFAULT_SOURCE = _REPO_ROOT / "Global Superstore Data.xlsx"
 _MANIFEST_PATH = _REPO_ROOT / ".artifacts" / "load_manifest.json"
 _DICTIONARY_PATH = _REPO_ROOT / "data_dictionary.md"
+# v2.0 Semantic Layer artifacts (regeneratable via generate-semantic-layer).
+_SEMANTIC_SOURCE_PATH = _REPO_ROOT / "src" / "data_engineering" / "dictionary" / "semantic_source.py"
+_SEMANTIC_LAYER_JSON_PATH = _REPO_ROOT / ".artifacts" / "semantic_layer.json"
+_SEMANTIC_LAYER_MD_PATH = _REPO_ROOT / ".artifacts" / "semantic_layer.md"
 # Expected row counts from the EDA (see research.md Part A) — the validator
 # uses these to confirm the loaded warehouse matches the canonical dataset.
 
@@ -393,6 +397,78 @@ def cmd_ask(question: str) -> None:
             print(f"Latency: {response.query_result.latency_ms}ms")
 
 
+def cmd_generate_semantic_layer() -> None:
+    """generate-semantic-layer: build and persist the Semantic Layer v2.0 artifact.
+
+    Produces two artifacts in `.artifacts/`:
+      - `semantic_layer.json`  (canonical, deterministic JSON — FR-007/SC-005)
+      - `semantic_layer.md`    (human-readable Markdown — FR-008)
+
+    The builder constructs the `SemanticLayerDocument` from the existing
+    `DataDictionaryDocument` (regenerated from the source workbook) and the
+    canonical metric definitions (`metrics.py`). No DB connection required.
+    Fail-fast (FR-013) if the source workbook is missing or the builder
+    detects an invalid reference (FR-006).
+
+    Prints a one-block summary: tables, metrics, dimensions, relationships.
+    """
+    from src.data_engineering.semantic_layer.builder import SemanticLayerBuilder
+    from src.data_engineering.semantic_layer.render import (
+        render_json,
+        render_markdown,
+    )
+
+    src_path = _DEFAULT_SOURCE
+    if not src_path.exists():
+        _err(f"Source workbook not found: {src_path}")
+
+    if not _SEMANTIC_SOURCE_PATH.exists():
+        _err(f"Semantic source not found: {_SEMANTIC_SOURCE_PATH}")
+
+    _info(f"Exploring workbook for semantic context: {src_path}")
+    tables, shared = explore_workbook(src_path)
+    source_sha = sha256_of_file(src_path)
+    inference = SchemaInferenceResult(
+        source_file=str(src_path),
+        source_sha256=source_sha,
+        tables=tables,
+        shared_columns=shared,
+        inferred_at=datetime.now(timezone.utc),
+    )
+    table_defs = infer_table_defs(tables)
+    document = generate_dictionary(inference, table_defs)
+
+    semantic_source_sha = sha256_of_file(_SEMANTIC_SOURCE_PATH)
+    _info("Building Semantic Layer document...")
+    builder = SemanticLayerBuilder()
+    semantic_doc = builder.build(
+        dictionary=document,
+        semantic_source_sha256=semantic_source_sha,
+        source_sha256=source_sha,
+    )
+
+    _SEMANTIC_LAYER_JSON_PATH.parent.mkdir(parents=True, exist_ok=True)
+    json_str = render_json(semantic_doc)
+    _SEMANTIC_LAYER_JSON_PATH.write_text(json_str, encoding="utf-8")
+    _info(f"Wrote Semantic Layer JSON to {_SEMANTIC_LAYER_JSON_PATH}")
+
+    md_str = render_markdown(semantic_doc)
+    _SEMANTIC_LAYER_MD_PATH.write_text(md_str, encoding="utf-8")
+    _info(f"Wrote Semantic Layer Markdown to {_SEMANTIC_LAYER_MD_PATH}")
+
+    # Summary block.
+    print("")
+    print("Semantic Layer summary")
+    print(f"  Version           : {semantic_doc.version}")
+    print(f"  Tables            : {len(semantic_doc.tables)}")
+    print(f"  Metrics           : {len(semantic_doc.metrics)}")
+    print(f"  Dimensions        : {len(semantic_doc.dimensions)}")
+    print(f"  Relationships     : {len(semantic_doc.relationships)}")
+    print(f"  Assumptions       : {len(semantic_doc.assumptions)}")
+    print(f"  Source SHA-256    : {semantic_doc.source_sha256[:16]}...")
+    print(f"  JSON deterministic: True (no generated_at field in JSON)")
+
+
 def cmd_evaluate() -> None:
     """evaluate: run the sanity-check evaluation (v1.1).
 
@@ -463,6 +539,7 @@ _COMMANDS = {
     "teardown": cmd_teardown,
     "validate": cmd_validate,
     "generate-dictionary": None,  # has special arg handling in main()
+    "generate-semantic-layer": None,  # v2.0 — has special arg handling in main()
     "ask": None,  # has special arg handling in main()
     "evaluate": None,  # has special arg handling in main()
 }
@@ -472,13 +549,14 @@ def main(argv: list[str] | None = None) -> None:
     """CLI entrypoint: `python -m src.cli <command>`."""
     args = argv if argv is not None else sys.argv[1:]
     if not args or args[0] in ("-h", "--help"):
-        print("Usage: python -m src.cli.main {bootstrap|teardown|validate|generate-dictionary} [args]")
+        print("Usage: python -m src.cli.main {bootstrap|teardown|validate|generate-dictionary|generate-semantic-layer|ask|evaluate} [args]")
         print("Commands:")
         print("  bootstrap [--source PATH]        Bring up PG, load data, write manifest")
         print("  teardown [--remove-volume]        Stop & remove container (and optionally volume)")
         print("  validate                          Single pass/fail health check")
         print("  generate-dictionary [--source P]  Generate data_dictionary.md from the schema")
-        print("  ask <question>                     Translate a natural-language question to SQL")
+        print("  generate-semantic-layer            Generate .artifacts/semantic_layer.{json,md}")
+        print("  ask <question> [--viewer <id>]     Translate a natural-language question to SQL")
         print("  evaluate                           Run sanity-check evaluation (v1.1)")
         sys.exit(0 if args else 1)
 
@@ -490,6 +568,9 @@ def main(argv: list[str] | None = None) -> None:
             if a in ("--source", "-s") and i + 1 < len(rest):
                 dict_source = rest[i + 1]
         cmd_generate_dictionary(source_file=dict_source)
+        return
+    if command == "generate-semantic-layer":
+        cmd_generate_semantic_layer()
         return
     if command == "ask":
         if not rest:
