@@ -130,8 +130,15 @@ def _wait_for_pg(config: PostgresConfig, timeout_s: int = 60) -> bool:
     return False
 
 
-def _err(msg: str) -> None:
-    """Print a clear, actionable error to stderr and exit non-zero (FR-013)."""
+from typing import NoReturn
+
+
+def _err(msg: str) -> NoReturn:
+    """Print a clear, actionable error to stderr and exit non-zero (FR-013).
+
+    Annotated `-> NoReturn` so static type-checkers can narrow `viewer` after
+    a fail-fast call (e.g., after _err, `viewer` is guaranteed non-None).
+    """
     print(f"ERROR: {msg}", file=sys.stderr)
     sys.exit(1)
 
@@ -460,11 +467,11 @@ def cmd_ask(
             delegate=repo,
             resolver=SemanticQueryResolver(),
             viewer=viewer,
-            table_def=orders_def,  # type: ignore[arg-type]  # confirmed non-None above
+            table_def=orders_def,
         )
         pipeline = TextToSqlPipeline(
             dictionary=document,
-            table_def=orders_def,  # type: ignore[arg-type]  # confirmed non-None above
+            table_def=orders_def,
             llm_client=llm_client,
             query_provider=query_provider,
             llm_config=llm_config,
@@ -623,7 +630,7 @@ def cmd_evaluate() -> None:
     with PostgresRepository(config=config) as repo:
         pipeline = TextToSqlPipeline(
             dictionary=document,
-            table_def=orders_def,  # type: ignore[arg-type]  # confirmed non-None above
+            table_def=orders_def,
             llm_client=llm_client,
             query_provider=repo,
             llm_config=llm_config,

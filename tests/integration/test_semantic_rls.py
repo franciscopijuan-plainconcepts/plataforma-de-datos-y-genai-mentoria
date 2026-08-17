@@ -74,7 +74,6 @@ def _direct_pg_sum(region_filter_values: list[str]) -> float | None:
     sql = f'SELECT SUM("Sales") AS total FROM Orders WHERE "Region" IN ({quoted})'
     config = PostgresConfig.from_env()
     with PostgresRepository(config=config) as repo:
-        # type: ignore[operator] — repo satisfies QueryProvider at runtime.
         rows = repo.execute_readonly_query(sql, table_def=None)  # type: ignore[arg-type]
     if not rows:
         return None

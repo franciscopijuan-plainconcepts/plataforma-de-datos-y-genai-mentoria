@@ -27,6 +27,7 @@ from src.contracts.semantic_layer import (
     SemanticViewer,
     TableSemanticClassification,
 )
+from src.contracts.text_to_sql import QueryRow
 from src.data_engineering.semantic_layer.metrics import get_metrics
 
 
@@ -267,7 +268,7 @@ def test_resolver_protocol_rejects_missing_apply_rls() -> None:
 
 # ---------------------------------------------------------------------------
 # T019: GovernedQueryProvider contract tests (v2.0 RLS enforcement decorator)
-# ---------------------------------------------------------------------------
+# ----------------------------------------------------------------------------
 
 def test_governed_query_provider_satisfies_query_provider_protocol() -> None:
     """FR-012: `GovernedQueryProvider` implements the `QueryProvider` Protocol.
@@ -285,7 +286,7 @@ def test_governed_query_provider_satisfies_query_provider_protocol() -> None:
 
     # Minimal stub delegate (structurally a QueryProvider).
     class _StubDelegate:
-        def execute_readonly_query(self, sql: str, table_def: TableDef) -> list:
+        def execute_readonly_query(self, sql: str, table_def: TableDef) -> list[QueryRow]:
             return []
 
     table_def = TableDef(
@@ -322,7 +323,7 @@ def test_governed_query_provider_calls_resolver_then_delegates() -> None:
             self.received_sql: str | None = None
             self.calls: int = 0
 
-        def execute_readonly_query(self, sql: str, table_def: TableDef) -> list:
+        def execute_readonly_query(self, sql: str, table_def: TableDef) -> list[QueryRow]:
             self.calls += 1
             self.received_sql = sql
             return []
@@ -359,7 +360,7 @@ def test_ungoverned_fail_fast_provider_raises_on_query() -> None:
     from src.data_engineering.semantic_layer.resolver import SemanticQueryResolver
 
     class _StubDelegate:
-        def execute_readonly_query(self, sql: str, table_def: TableDef) -> list:
+        def execute_readonly_query(self, sql: str, table_def: TableDef) -> list[QueryRow]:
             return []
 
     table_def = TableDef(
@@ -391,7 +392,7 @@ def test_build_governed_provider_returns_governed_when_viewer_present() -> None:
     from src.data_engineering.semantic_layer.resolver import SemanticQueryResolver
 
     class _StubDelegate:
-        def execute_readonly_query(self, sql: str, table_def: TableDef) -> list:
+        def execute_readonly_query(self, sql: str, table_def: TableDef) -> list[QueryRow]:
             return []
 
     table_def = TableDef(

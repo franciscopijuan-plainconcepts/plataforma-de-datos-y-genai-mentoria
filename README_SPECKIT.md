@@ -11,7 +11,22 @@ Guia de continuidad para el equipo sobre como usamos Spec Kit en este proyecto, 
 
 ## Resumen de lo que ya hicimos con Spec Kit
 
-Se ejecuto el flujo completo para la feature baseline de la plataforma de datos:
+Se ejecutaron tres features completas con Spec Kit:
+
+1. **Feature 001 (`data-genai-platform-baseline`)** — v0 baseline: PostgreSQL en Docker, data dictionary, CLI bootstrap/teardown/validate/generate-dictionary, contratos tipados, tests de contrato e integracion.
+2. **Feature 002 (`text-to-sql-v1`)** — v1.0/v1.1: pipeline NL→SQL sobre Orders via Forge proxy, `ask` + `evaluate` CLI, logging estructurado, sanity-check de ~10 preguntas.
+3. **Feature 003 (`semantic-layer-v1`)** — v2.0: Semantic Layer con métricas/dimensiones/relaciones + RLS por `Region` usando `People`. Satisface constitution Principle IV por primera vez.
+
+Cada feature siguio el flujo completo: constitution (solo 001), spec, plan + research + data-model + contracts + quickstart, tasks, implement por fases, validacion. La feature 003 introdujo:
+- `src/data_engineering/semantic_layer/` subpaquete (builder, resolver, governed_provider, registry, metrics, render).
+- `src/contracts/semantic_layer.py` con `SemanticLayerDocument`, `SemanticViewer`, `Metric`, `Dimension`, `SemanticRelationship`, `SemanticQueryResolverProtocol` (todos Pydantic v2 frozen).
+- `GovernedQueryProvider` Decorator sobre `QueryProvider` que enforce RLS en cada call (constitution Principle IV, NON-NEGOTIABLE).
+- `viewers.yaml` + registry con `pyyaml` (única dependencia nueva).
+- `semantic_layer.json`/`semantic_layer.md` artifacts regenerables y deterministas.
+- CLI: `generate-semantic-layer` + `ask --viewer <id>` + `--allow-full-access` (local/dev only).
+- Boundary tests extendidos: `pyyaml` confined a registry; ningún caller de `execute_readonly_query` en `ai_engineering` importa el adapter directamente (RLS bypass prevention).
+
+Para la feature 001, el detalle del flujo abajo se mantiene como referencia:
 
 1. Constitucion de arquitectura y calidad ratificada en [.specify/memory/constitution.md](.specify/memory/constitution.md).
 2. Especificacion funcional creada en [specs/001-data-genai-platform-baseline/spec.md](specs/001-data-genai-platform-baseline/spec.md).
@@ -96,10 +111,14 @@ Regla practica: no implementar nada que no este trazado en spec/plan/tasks, salv
 ## Convenciones acordadas en esta baseline
 
 - Tipado estricto en Python y contratos Pydantic para cruces entre capas.
-- Separacion clara de responsabilidades (data_engineering, data_access, contracts, cli).
+- Separacion clara de responsabilidades (data_engineering, ai_engineering, data_access, contracts, cli).
 - Codigo de engine PostgreSQL aislado en adapters.
-- Sin adelantar alcance de v1.x o v2.0 dentro de baseline.
+- Sin adelantar alcance de features posteriores (v1.x no introdujo Semantic Layer; v2.0 lo entregó completo).
 - Pruebas de contrato para boundaries + pruebas de integracion contra PostgreSQL real en Docker.
+- **v2.0 (Semantic Layer)**: `pyyaml` (única dependencia nueva en v2.0) confined a `src/data_engineering/semantic_layer/registry.py` (boundary test enforced).
+- **v2.0 (Governance)**: ningún caller de `execute_readonly_query` en `src/ai_engineering/` puede importar el adapter directo; siempre debe recibir un `QueryProvider` (idealmente un `GovernedQueryProvider` wrapper) para que RLS aplique. `GovernedQueryProvider` es el single enforcement point de Principle IV.
+- **v2.0 (Viewer config)**: `viewers.yaml` es local-only (gitignored); el template committed es `viewers.example.yaml`. `SEMANTIC_VIEWERS_FILE` overridea el path; `ENV` gatea `allows_full_access` (solo local/dev/test).
+- **v2.0 (Determinismo)**: `semantic_layer.json` excluye `generated_at` (timestamp va solo al `.md`) para ser byte-determinista entre regeneraciones (SC-005).
 
 ## Como continuar con la siguiente feature (playbook de equipo)
 
@@ -129,6 +148,13 @@ Regla practica: no implementar nada que no este trazado en spec/plan/tasks, salv
 - Inserciones SQL usando nombres de campo en lugar de nombres de columna reales.
 - Bootstrap no idempotente (duplicados de PK en re-ejecucion).
 - Fugas de dependencias de infraestructura fuera de sus adapters.
+
+### En v2.0 (Semantic Layer):
+
+- **`_gov` alias reservado**: el `SemanticQueryResolver` usa `_gov` como alias externo del subquery wrapping. El LLM nunca generara este alias (el `SqlValidator` de 002 lo garantiza implicitamente), pero se mantiene defensive.
+- **Mismmatch `People.Region` (Eastern/Western Canada) vs `Orders.Region` (Canada)**: el resolver es conservador — un viewer scoped a `Eastern Canada` no matchea filas de `Orders` (devuelve 0 filas). La consolidacion es v3.0+ scope.
+- **`Returns.Order ID` tiene 63 duplicados**: la fórmula de `returned_amount`/`net_sales` usa `EXISTS (SELECT 1 FROM Returns WHERE Returns."Order ID" = Orders."Order ID")`, NO un JOIN directo (que duplicaría filas de Orders).
+- **`allows_full_access` fuera de local/dev**: el `ViewerRegistry` fuerza `allows_full_access=False` si `ENV` no esta en `{local, dev, test}` (defense-in-depth — no basta con el yaml para escapar governance en prod).
 
 Si aparece un problema similar, revisar primero contratos, adapter PostgreSQL, loader y tests de boundary.
 

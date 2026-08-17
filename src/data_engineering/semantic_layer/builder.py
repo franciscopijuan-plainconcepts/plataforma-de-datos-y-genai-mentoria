@@ -26,9 +26,10 @@ from __future__ import annotations
 
 import re
 from datetime import datetime, timezone
-from typing import Mapping
+from typing import cast, Literal
 
 from src.contracts.data_access import ForeignKeyDef
+from typing import Mapping, cast, Literal
 from src.contracts.dictionary import DataDictionaryDocument, TableDictionary
 from src.contracts.semantic_layer import (
     Dimension,
@@ -284,13 +285,18 @@ class SemanticLayerBuilder:
                     f"Dimension {name!r} references unknown Orders column "
                     f"{column!r}. Known Orders columns: {sorted(orders_columns)}."
                 )
+            from typing import cast
+
             dimensions.append(
                 Dimension(
                     name=name,
                     column=column,
                     source_table="Orders",
                     business_description=desc,
-                    dimension_type=dim_type,
+                    dimension_type=cast(
+                        "Literal['categorical', 'temporal', 'geographic']",
+                        dim_type,
+                    ),
                 )
             )
             seen_dim_names.add(name)

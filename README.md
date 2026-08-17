@@ -2,11 +2,14 @@
 
 A Data and GenAI Platform that connects Generative AI to a Data Warehouse.
 
-> **Status**: Baseline (v0) — local PostgreSQL warehouse + data dictionary.
-> Text-to-SQL (v1.0/1.1) and Semantic Layer + RLS (v2.0) are planned future
-> milestones (see `specs/001-data-genai-platform-baseline/spec.md`).
+> **Status**: v2.0 — Baseline + Text-to-SQL + Semantic Layer (with RLS governance).
+> The warehouse, data dictionary, NL→SQL pipeline, and governed Semantic Layer
+> are all delivered. See `specs/` for the feature_specs and
+> `README_STATUS.md` for the current roadmap (milestones M0–M3 delivered).
 
-## What this baseline delivers
+## What the platform delivers
+
+### Baseline (M0 / v0)
 
 - A locally-running, containerized PostgreSQL data warehouse loaded with the
   three relational Global Superstore tables (`Orders`, `Returns`, `People`).
@@ -15,6 +18,27 @@ A Data and GenAI Platform that connects Generative AI to a Data Warehouse.
 - Bootstrap, teardown, validate, and generate-dictionary CLI commands.
 - A strictly-typed, engine-agnostic data-access layer that allows a seamless
   future migration to Google BigQuery.
+
+### Text-to-SQL (M1+M2 / v1.0 + v1.1)
+
+- Natural-language → SQL pipeline (`ask` command) over the `Orders` table:
+  prompt → LLM (Forge proxy) → validated SQL → executed → typed result rows.
+- Structured logging (`evaluate` command, sanity-check over ~10 questions).
+- Strong SQL validator: SELECT-only, no forbidden keywords, Orders-only columns.
+
+### Semantic Layer (M3 / v2.0)
+
+- A governed Semantic Layer (`SemanticLayerDocument` artifact regeneratable
+  via `generate-semantic-layer`) that declares 8 metrics (incl. net sales,
+  return rate, net profit), 11 dimensions, and cross-table relationships.
+- Row-Level Security (RLS) enforced at the Semantic Layer boundary per
+  constitution Principle IV (NON-NEGOTIABLE). No LLM-generated SQL can bypass
+  `WHERE "Region" IN (viewer.regions)` filtering.
+- Viewer-based governance: configure `viewers.yaml`, then `ask --viewer alice`
+  scopes results to Alice's regions.
+- Prompt enrichment: when the Semantic Layer is loaded, the prompt includes
+  metrics + dimensions + Returns-join notes so the LLM distinguishes
+  gross_sales from net_sales.
 
 ## Team Handoff Docs
 
@@ -29,6 +53,10 @@ A Data and GenAI Platform that connects Generative AI to a Data Warehouse.
 - [Docker](https://www.docker.com/) (with Docker Compose) installed and running.
 - [`uv`](https://docs.astral.sh/uv/) (manages Python and dependencies).
 - The source file `Global Superstore Data.xlsx` in the repository root.
+- A `.env` file with `FORGE_API_KEY` set (copy `.env.example` and fill it).
+- For Semantic Layer RLS: a `viewers.yaml` file describing your viewers
+  (copy `viewers.example.yaml` and edit). Optional — required only for
+  the `ask --viewer <id>` command.
 
 ## Quickstart
 
@@ -42,15 +70,24 @@ uv run python -m src.cli.main bootstrap
 # 3. Validate the environment
 uv run python -m src.cli.main validate
 
-# 4. (Re)generate the data dictionary (Phase 4)
+# 4. (Re)generate the data dictionary
 uv run python -m src.cli.main generate-dictionary
 
-# 5. Tear down the environment when done
+# 5. Generate the Semantic Layer artifact (metrics, dimensions, RLS metadata)
+uv run python -m src.cli.main generate-semantic-layer
+
+# 6. Ask a natural-language question (RLS-scoped by the active viewer)
+cp viewers.example.yaml viewers.yaml   # one-time viewer config (local-only)
+uv run python -m src.cli.main ask --viewer alice "What is the total sales amount?"
+
+# 7. Tear down the environment when done
 uv run python -m src.cli.main teardown
 ```
 
 See [`specs/001-data-genai-platform-baseline/quickstart.md`](specs/001-data-genai-platform-baseline/quickstart.md)
-for the full validation guide.
+for the baseline validation guide and
+[`specs/003-semantic-layer-v1/quickstart.md`](specs/003-semantic-layer-v1/quickstart.md)
+for the Semantic Layer RLS validation guide.
 
 ### Clean-clone bootstrap (T026 / FR-016)
 

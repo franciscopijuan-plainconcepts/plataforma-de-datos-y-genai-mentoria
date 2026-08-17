@@ -61,8 +61,7 @@ def _build_test_table_defs() -> list[TableDef]:
     returns_columns = [
         ColumnDef(name="Return ID", logical_type=LogicalType.INTEGER, nullable=False, is_primary_key=True),
         ColumnDef(name="Returned", logical_type=LogicalType.STRING, max_length=5, nullable=False),
-        ColumnDef(name="Order ID", logical_type=LogicalType.STRING, max_length=50, nullable=False,
-                   foreign_keys=[]),
+        ColumnDef(name="Order ID", logical_type=LogicalType.STRING, max_length=50, nullable=False),
         ColumnDef(name="Region", logical_type=LogicalType.STRING, max_length=50, nullable=False),
     ]
     people_columns = [

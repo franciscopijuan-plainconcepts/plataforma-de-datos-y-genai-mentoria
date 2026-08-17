@@ -47,7 +47,7 @@ def _resolve_path(path: Path | None) -> Path:
     return _DEFAULT_VIEWERS_PATH
 
 
-def _parse_yaml_viewers(raw: dict) -> list[dict]:
+def _parse_yaml_viewers(raw: dict[str, object]) -> list[dict[str, object]]:
     """Extract the `viewers: [...]` list from the parsed YAML document.
 
     The expected shape:
@@ -72,7 +72,7 @@ def _parse_yaml_viewers(raw: dict) -> list[dict]:
     return viewers
 
 
-def _build_viewer(raw_entry: dict) -> SemanticViewer:
+def _build_viewer(raw_entry: dict[str, object]) -> SemanticViewer:
     """Convert a raw dict from YAML into a validated `SemanticViewer`.
 
     Enforces the `is_local_dev` gating of `allows_full_access` at load time
@@ -122,7 +122,7 @@ class ViewerRegistry:
             )
         with resolved.open("r", encoding="utf-8") as f:
             try:
-                raw: dict = yaml.safe_load(f)
+                raw: dict[str, object] = yaml.safe_load(f)
             except yaml.YAMLError as exc:
                 raise ValueError(
                     f"Viewers YAML at {resolved} is malformed: {exc}"
