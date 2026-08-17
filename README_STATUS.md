@@ -4,20 +4,28 @@ Documento vivo para seguimiento del estado actual, decisiones clave, riesgos y s
 
 ## Estado actual (snapshot)
 
-- Fecha de actualizacion: 2026-08-11
-- Branch principal: main (feature en `002-text-to-sql-v1`)
-- Estado global: v1.0/v1.1 Text-to-SQL implementado y validado
+- Fecha de actualizacion: 2026-08-17
+- Branch principal: main (feature en `003-semantic-layer-v1`)
+- Estado global: v2.0 Semantic Layer + Governance implementado y validado
 - Ambito completado:
   - Warehouse local PostgreSQL en Docker (v0 baseline)
   - Ingestion desde Global Superstore Data.xlsx (v0)
   - Data dictionary generado y versionado (v0)
   - CLI operativa baseline: bootstrap, teardown, validate, generate-dictionary (v0)
   - Contratos tipados, boundaries y tests de integracion (v0)
-  - **Text-to-SQL v1.0**: pipeline NL → LLM → SQL validado → ejecucion → resultados tipados (v1.0)
-  - **Text-to-SQL v1.1**: logging estructurado + sanity-check evaluation (~10 preguntas) (v1.1)
-  - Nuevos comandos CLI: `ask <question>` y `evaluate` (v1.0/v1.1)
-  - Nuevo dominio `src/ai_engineering/` (llm_client, prompt_builder, sql_validator, pipeline, evaluation)
-  - `QueryProvider` Protocol extendido con `execute_readonly_query` (read-only, tipado)
+  - Text-to-SQL v1.0: pipeline NL → LLM → SQL validado → ejecucion → resultados tipados (v1.0)
+  - Text-to-SQL v1.1: logging estructurado + sanity-check evaluation (~10 preguntas) (v1.1)
+  - Nuevos comandos CLI v1.x: `ask <question>` y `evaluate` (v1.0/v1.1)
+  - Dominio `src/ai_engineering/` (llm_client, prompt_builder, sql_validator, pipeline, evaluation)
+  - `QueryProvider` Protocol extendido con `execute_readonly_query` (v1.0)
+  - **Semantic Layer v2.0**: `SemanticLayerDocument` (8 métricas, 11 dimensiones, 2 relaciones) regenerable como artifact determinista (v2.0)
+  - **RLS enforcement via `GovernedQueryProvider`**: ningún SQL del LLM bypassa `WHERE Region IN (viewer.regions)` (v2.0, constitution Principle IV satisfecha por primera vez)
+  - **Viewer-based governance**: `viewers.yaml` + `ask --viewer <id>` + `--allow-full-access` (local/dev only) (v2.0)
+  - **Prompt enrichment**: `PromptBuilder` ahora incluye bloque condensado de métricas/dimensiones/joins cuando el Semantic Layer está cargado (v2.0)
+  - Nuevos comandos CLI v2.0: `generate-semantic-layer`, `ask --viewer <id>` (v2.0)
+  - Logging extendido con `viewer_id`, `regions`, `gov_bypass` flag en `.artifacts/text_to_sql.log` (v2.0, FR-021)
+  - Subpaquete nuevo `src/data_engineering/semantic_layer/` con builder, resolver, governed_provider, registry, metrics, render (v2.0)
+  - Contratos nuevos en `src/contracts/semantic_layer.py` (Pydantic v2 frozen) (v2.0)
 
 ## Evidencias de completitud
 
@@ -56,11 +64,13 @@ Documento vivo para seguimiento del estado actual, decisiones clave, riesgos y s
 - Sanity-check evaluation: ~10 preguntas, comparacion de SQL normalizado, summary simple.
 - Comando CLI `evaluate`: corre el sanity check e imprime `X / N correct`.
 
-### Pendiente para v2.0 (siguiente)
+### Pendiente para v3.0 (siguiente)
 
-- Semantic Layer para formalizar metrica/logica de negocio.
-- Governance sobre la capa semantica.
-- RBAC/RLS asociado a People/Region y politicas por dominio.
+- RBAC column-level fino (ocultar columnas individuales por rol) — declarado pero no enforced en v2.0.
+- Resolucion del mismatch de taxonomia `People.Region` (Eastern/Western Canada) vs `Orders.Region` (Canada) — conservador en v2.0; la consolidación es v3.0+.
+- Sistema de autenticación real (OIDC/JWT) — fuera de scope en v2.0 (viewer viene de config local).
+- Audit logging persistente y lineage indexable — logging básico sí, sistema completo no.
+- Migración a Google BigQuery.
 
 ## Calidad tecnica actual
 
@@ -84,9 +94,13 @@ Incidencias de Docker afectan bootstrap/integracion; conviene estandarizar prere
 
 3. Calidad semantica para Text-to-SQL
 La siguiente fase requiere definiciones de negocio mas estrictas para evitar SQL incorrecto aunque sea sintacticamente valido.
+**Resuelto en v2.0**: el `SemanticLayerDocument` ahora formaliza 8 métricas (incl. net_sales, return_rate, net_profit) con fórmulas SQL canonizadas, y el `PromptBuilder` las inyecta en el prompt del LLM.
 
 4. Gobernanza aun diferida
-RLS/RBAC no esta activo en v0; no asumir controles de acceso avanzados hasta v2.0.
+**Resuelto en v2.0**: RLS por `Region` está enforced por el `GovernedQueryProvider` decorator en cada `execute_readonly_query` call. Ningún SQL del LLM bypassa la governance (constitution Principle IV satisfecha). RBAC column-level queda para v3.0+.
+
+5. Mismatch de taxonomía `People.Region` (24 valores, divide Canada en Eastern/Western) vs `Orders.Region` (23 valores, Canada unificado)
+**Nuevo riesgo en v2.0**: el resolver es conservador — un viewer scoped a `Eastern Canada` no matchea filas de `Orders.Region = 'Canada'` (devuelve 0 filas). La consolidación es v3.0+ scope.
 
 ## Siguiente plan de ejecucion recomendado
 
@@ -110,7 +124,8 @@ RLS/RBAC no esta activo en v0; no asumir controles de acceso avanzados hasta v2.
 | M0 | v0 Baseline (warehouse + dictionary) | Completado | - | 2026-08-04 | Local PostgreSQL + data dictionary + CLI |
 | M1 | v1.0 Text-to-SQL sobre Orders | Completado | - | 2026-08-11 | Pipeline NL→SQL→resultados tipados |
 | M2 | v1.1 Hardening + Evaluation | Completado | - | 2026-08-11 | Logging + sanity-check (~10 preguntas) |
-| M3 | v2.0 Semantic Layer + Governance | Pendiente | TBD | TBD | Modelado semantico, RBAC/RLS |
+| M3 | v2.0 Semantic Layer + RLS Governance | Completado | - | 2026-08-17 | SemanticLayerDocument + GovernedQueryProvider (RLS enforced, Principle IV satisfied) |
+| M4 | v3.0 RBAC column-level + People.Region taxonomy + Audit | Pendiente | TBD | TBD | Resolución de mismatch Canada; auth real; audit persistente |
 
 ## Rutina de mantenimiento de este documento
 

@@ -48,6 +48,10 @@ _COMPOSE_FILE = _REPO_ROOT / "docker" / "docker-compose.yml"
 _DEFAULT_SOURCE = _REPO_ROOT / "Global Superstore Data.xlsx"
 _MANIFEST_PATH = _REPO_ROOT / ".artifacts" / "load_manifest.json"
 _DICTIONARY_PATH = _REPO_ROOT / "data_dictionary.md"
+# v2.0 Semantic Layer artifacts (regeneratable via generate-semantic-layer).
+_SEMANTIC_SOURCE_PATH = _REPO_ROOT / "src" / "data_engineering" / "dictionary" / "semantic_source.py"
+_SEMANTIC_LAYER_JSON_PATH = _REPO_ROOT / ".artifacts" / "semantic_layer.json"
+_SEMANTIC_LAYER_MD_PATH = _REPO_ROOT / ".artifacts" / "semantic_layer.md"
 # Expected row counts from the EDA (see research.md Part A) — the validator
 # uses these to confirm the loaded warehouse matches the canonical dataset.
 
@@ -126,8 +130,15 @@ def _wait_for_pg(config: PostgresConfig, timeout_s: int = 60) -> bool:
     return False
 
 
-def _err(msg: str) -> None:
-    """Print a clear, actionable error to stderr and exit non-zero (FR-013)."""
+from typing import NoReturn
+
+
+def _err(msg: str) -> NoReturn:
+    """Print a clear, actionable error to stderr and exit non-zero (FR-013).
+
+    Annotated `-> NoReturn` so static type-checkers can narrow `viewer` after
+    a fail-fast call (e.g., after _err, `viewer` is guaranteed non-None).
+    """
     print(f"ERROR: {msg}", file=sys.stderr)
     sys.exit(1)
 
@@ -312,16 +323,36 @@ def cmd_generate_dictionary(source_file: str | None = None) -> None:
     _info("Done.")
 
 
-def cmd_ask(question: str) -> None:
+def cmd_ask(
+    question: str,
+    viewer_id: str | None = None,
+    allow_full_access: bool = False,
+) -> None:
     """ask: translate a natural-language question to SQL and return results.
 
     Builds the Text-to-SQL pipeline (prompt → LLM → validate → execute) and
     prints the generated SQL, validation status, and result rows.
     Fail-fast (FR-013) if FORGE_API_KEY is missing or the warehouse is not running.
+
+    v2.0 (feature 003-semantic-layer-v1):
+      - Requires a `--viewer <id>` (constitution Principle IV — governance is
+        non-negotiable). Without a viewer, fails fast unless `--allow-full-access`
+        is passed in a local/dev environment.
+      - Wires the `GovernedQueryProvider` decorator around the PG adapter so
+        RLS is enforced on every executed query.
+      - When the Semantic Layer artifact exists at `.artifacts/semantic_layer.json`,
+        loads it and passes it to the pipeline so the prompt includes metrics.
     """
     from src.ai_engineering.llm_client import LlmClient
     from src.ai_engineering.pipeline import TextToSqlPipeline
+    from src.contracts.semantic_layer import SemanticViewer
     from src.contracts.text_to_sql import LlmConfig, NLQuestion
+    from src.data_engineering.semantic_layer.builder import SemanticLayerBuilder
+    from src.data_engineering.semantic_layer.governed_provider import (
+        build_governed_provider,
+    )
+    from src.data_engineering.semantic_layer.registry import ViewerRegistry
+    from src.data_engineering.semantic_layer.resolver import SemanticQueryResolver
 
     # --- Fail-fast checks (FR-013) ---
     try:
@@ -333,6 +364,90 @@ def cmd_ask(question: str) -> None:
         _err("Docker is not running. Run `bootstrap` first to start the warehouse.")
 
     config = PostgresConfig.from_env()
+
+    # --- Resolve the viewer (governance context) ---
+    # v2.0 "login as a person" model: try the People table first (the canonical
+    # governance mapping per constitution Principle IV), then fall back to the
+    # static `viewers.yaml` registry for escape hatches like `admin_dev`.
+    import os
+
+    is_local_dev = os.environ.get("ENV", "").strip().lower() in {"local", "dev", "test"}
+
+    viewer: SemanticViewer | None = None
+    if viewer_id is not None:
+        from src.data_engineering.semantic_layer.person_resolver import (
+            PeopleViewerResolver,
+        )
+
+        # The People resolver needs an UNGOVERNED provider so it can read the
+        # full People table without being scoped by RLS (People IS the mapping,
+        # not subject to it). We use the raw PostgresRepository here, and build
+        # the GovernedQueryProvider below for the actual ask pipeline.
+        with PostgresRepository(config=config) as people_repo:
+            people_resolver = PeopleViewerResolver(
+                query_provider=people_repo,
+                is_local_dev=is_local_dev,
+            )
+            try:
+                viewer = people_resolver.resolve(viewer_id)
+            except Exception as exc:
+                _err(
+                    f"Could not read the People table to resolve viewer "
+                    f"{viewer_id!r}: {exc}. Is the warehouse running?"
+                )
+
+        if viewer is not None:
+            _info(
+                f"Logged in as person {viewer_id!r}: "
+                f"region={viewer.regions!r} (resolved from People table)"
+            )
+        else:
+            # People did not match → fall back to the static viewers.yaml registry.
+            try:
+                viewer = ViewerRegistry().get_viewer(viewer_id)
+                _info(
+                    f"Loaded viewer {viewer_id!r} from viewers.yaml: "
+                    f"regions={list(viewer.regions)} "
+                    f"allows_full_access={viewer.allows_full_access}"
+                )
+            except FileNotFoundError as exc:
+                _err(str(exc))
+            except ValueError as exc:
+                # No match in People nor viewers.yaml — list both sources.
+                try:
+                    available_people = people_resolver.list_available()
+                except Exception:
+                    available_people = []
+                _err(
+                    f"Viewer {viewer_id!r} not found. "
+                    f"People available: {available_people}. "
+                    f"Configure custom viewers in viewers.yaml (see "
+                    "viewers.example.yaml)."
+                )
+    elif allow_full_access:
+        # `--allow-full-access` without --viewer: build an ad-hoc full-access viewer.
+        # Only effective in local/dev (the registry enforces is_local_dev gating).
+        import os
+
+        env = os.environ.get("ENV", "").strip().lower()
+        if env not in {"local", "dev", "test"}:
+            _err(
+                "--allow-full-access without --viewer is only honored in local/dev/test "
+                f"(got ENV={env!r}). Set a real viewer via --viewer <id>."
+            )
+        viewer = SemanticViewer(
+            viewer_id="full_access_local_dev",
+            regions=[],
+            allows_full_access=True,
+            is_local_dev=True,
+        )
+        _info("WARNING: running in full-access mode (no RLS). Only for local/dev.")
+    else:
+        _err(
+            "Governance is non-negotiable (constitution Principle IV). "
+            "Provide --viewer <id> (see viewers.example.yaml) or, in local/dev, "
+            "--allow-full-access."
+        )
 
     # --- Build the pipeline ---
     src_path = _DEFAULT_SOURCE
@@ -358,16 +473,56 @@ def cmd_ask(question: str) -> None:
 
     document = generate_dictionary(inference, table_defs)
 
+    # --- Optional: load the Semantic Layer artifact for prompt enrichment (US3) ---
+    semantic_doc = None
+    if _SEMANTIC_LAYER_JSON_PATH.exists():
+        try:
+            import json
+
+            payload = json.loads(_SEMANTIC_LAYER_JSON_PATH.read_text())
+            from src.contracts.semantic_layer import SemanticLayerDocument
+
+            # `generated_at` is excluded from the canonical JSON; supply a
+            # placeholder so the model validates (it's not used at runtime).
+            payload.setdefault("generated_at", datetime.now(timezone.utc).isoformat())
+            semantic_doc = SemanticLayerDocument.model_validate(payload)
+            _info(f"Loaded Semantic Layer artifact from {_SEMANTIC_LAYER_JSON_PATH}")
+        except Exception as exc:
+            _info(
+                f"WARNING: could not load Semantic Layer artifact ({exc}); "
+                "continuing without semantic enrichment."
+            )
+            semantic_doc = None
+    else:
+        # Build on the fly if the artifact doesn't exist (best-effort).
+        try:
+            builder = SemanticLayerBuilder()
+            semantic_doc = builder.build(
+                dictionary=document,
+                semantic_source_sha256=sha256_of_file(_SEMANTIC_SOURCE_PATH),
+                source_sha256=source_sha,
+            )
+        except Exception as exc:
+            _info(f"WARNING: could not build Semantic Layer on the fly ({exc}).")
+
     llm_client = LlmClient(llm_config)
 
-    # --- Run the pipeline ---
+    # --- Run the pipeline with a GovernedQueryProvider (RLS enforced) ---
     with PostgresRepository(config=config) as repo:
+        query_provider = build_governed_provider(
+            delegate=repo,
+            resolver=SemanticQueryResolver(),
+            viewer=viewer,
+            table_def=orders_def,
+        )
         pipeline = TextToSqlPipeline(
             dictionary=document,
-            table_def=orders_def,  # type: ignore[arg-type]  # confirmed non-None above
+            table_def=orders_def,
             llm_client=llm_client,
-            query_provider=repo,
+            query_provider=query_provider,
             llm_config=llm_config,
+            semantic_layer=semantic_doc,
+            viewer=viewer,
         )
         response = pipeline.run(NLQuestion(text=question))
 
@@ -377,6 +532,7 @@ def cmd_ask(question: str) -> None:
         sys.exit(1)
 
     print(f"Question: {response.question.text}")
+    print(f"Viewer: {viewer_id or 'full_access_local_dev'} (regions: {list(viewer.regions)})")
     print(f"Generated SQL: {response.generated_sql.sql}")
     print(f"Validation: {'ACCEPTED' if response.validation.accepted else 'REJECTED'}")
     if response.validation.reason:
@@ -391,6 +547,78 @@ def cmd_ask(question: str) -> None:
             for row in response.query_result.rows:
                 print(f"  {row.data}")
             print(f"Latency: {response.query_result.latency_ms}ms")
+
+
+def cmd_generate_semantic_layer() -> None:
+    """generate-semantic-layer: build and persist the Semantic Layer v2.0 artifact.
+
+    Produces two artifacts in `.artifacts/`:
+      - `semantic_layer.json`  (canonical, deterministic JSON — FR-007/SC-005)
+      - `semantic_layer.md`    (human-readable Markdown — FR-008)
+
+    The builder constructs the `SemanticLayerDocument` from the existing
+    `DataDictionaryDocument` (regenerated from the source workbook) and the
+    canonical metric definitions (`metrics.py`). No DB connection required.
+    Fail-fast (FR-013) if the source workbook is missing or the builder
+    detects an invalid reference (FR-006).
+
+    Prints a one-block summary: tables, metrics, dimensions, relationships.
+    """
+    from src.data_engineering.semantic_layer.builder import SemanticLayerBuilder
+    from src.data_engineering.semantic_layer.render import (
+        render_json,
+        render_markdown,
+    )
+
+    src_path = _DEFAULT_SOURCE
+    if not src_path.exists():
+        _err(f"Source workbook not found: {src_path}")
+
+    if not _SEMANTIC_SOURCE_PATH.exists():
+        _err(f"Semantic source not found: {_SEMANTIC_SOURCE_PATH}")
+
+    _info(f"Exploring workbook for semantic context: {src_path}")
+    tables, shared = explore_workbook(src_path)
+    source_sha = sha256_of_file(src_path)
+    inference = SchemaInferenceResult(
+        source_file=str(src_path),
+        source_sha256=source_sha,
+        tables=tables,
+        shared_columns=shared,
+        inferred_at=datetime.now(timezone.utc),
+    )
+    table_defs = infer_table_defs(tables)
+    document = generate_dictionary(inference, table_defs)
+
+    semantic_source_sha = sha256_of_file(_SEMANTIC_SOURCE_PATH)
+    _info("Building Semantic Layer document...")
+    builder = SemanticLayerBuilder()
+    semantic_doc = builder.build(
+        dictionary=document,
+        semantic_source_sha256=semantic_source_sha,
+        source_sha256=source_sha,
+    )
+
+    _SEMANTIC_LAYER_JSON_PATH.parent.mkdir(parents=True, exist_ok=True)
+    json_str = render_json(semantic_doc)
+    _SEMANTIC_LAYER_JSON_PATH.write_text(json_str, encoding="utf-8")
+    _info(f"Wrote Semantic Layer JSON to {_SEMANTIC_LAYER_JSON_PATH}")
+
+    md_str = render_markdown(semantic_doc)
+    _SEMANTIC_LAYER_MD_PATH.write_text(md_str, encoding="utf-8")
+    _info(f"Wrote Semantic Layer Markdown to {_SEMANTIC_LAYER_MD_PATH}")
+
+    # Summary block.
+    print("")
+    print("Semantic Layer summary")
+    print(f"  Version           : {semantic_doc.version}")
+    print(f"  Tables            : {len(semantic_doc.tables)}")
+    print(f"  Metrics           : {len(semantic_doc.metrics)}")
+    print(f"  Dimensions        : {len(semantic_doc.dimensions)}")
+    print(f"  Relationships     : {len(semantic_doc.relationships)}")
+    print(f"  Assumptions       : {len(semantic_doc.assumptions)}")
+    print(f"  Source SHA-256    : {semantic_doc.source_sha256[:16]}...")
+    print(f"  JSON deterministic: True (no generated_at field in JSON)")
 
 
 def cmd_evaluate() -> None:
@@ -448,7 +676,7 @@ def cmd_evaluate() -> None:
     with PostgresRepository(config=config) as repo:
         pipeline = TextToSqlPipeline(
             dictionary=document,
-            table_def=orders_def,  # type: ignore[arg-type]  # confirmed non-None above
+            table_def=orders_def,
             llm_client=llm_client,
             query_provider=repo,
             llm_config=llm_config,
@@ -463,6 +691,7 @@ _COMMANDS = {
     "teardown": cmd_teardown,
     "validate": cmd_validate,
     "generate-dictionary": None,  # has special arg handling in main()
+    "generate-semantic-layer": None,  # v2.0 — has special arg handling in main()
     "ask": None,  # has special arg handling in main()
     "evaluate": None,  # has special arg handling in main()
 }
@@ -472,13 +701,17 @@ def main(argv: list[str] | None = None) -> None:
     """CLI entrypoint: `python -m src.cli <command>`."""
     args = argv if argv is not None else sys.argv[1:]
     if not args or args[0] in ("-h", "--help"):
-        print("Usage: python -m src.cli.main {bootstrap|teardown|validate|generate-dictionary} [args]")
+        print("Usage: python -m src.cli.main {bootstrap|teardown|validate|generate-dictionary|generate-semantic-layer|ask|evaluate} [args]")
         print("Commands:")
         print("  bootstrap [--source PATH]        Bring up PG, load data, write manifest")
         print("  teardown [--remove-volume]        Stop & remove container (and optionally volume)")
         print("  validate                          Single pass/fail health check")
         print("  generate-dictionary [--source P]  Generate data_dictionary.md from the schema")
-        print("  ask <question>                     Translate a natural-language question to SQL")
+        print("  generate-semantic-layer            Generate .artifacts/semantic_layer.{json,md}")
+        print("  ask <question> [--viewer <id>]     Translate a natural-language question to SQL")
+        print("                                      (--viewer <id> resolves a person from the")
+        print("                                       People table, or a custom viewer from")
+        print("                                       viewers.yaml)")
         print("  evaluate                           Run sanity-check evaluation (v1.1)")
         sys.exit(0 if args else 1)
 
@@ -491,12 +724,32 @@ def main(argv: list[str] | None = None) -> None:
                 dict_source = rest[i + 1]
         cmd_generate_dictionary(source_file=dict_source)
         return
+    if command == "generate-semantic-layer":
+        cmd_generate_semantic_layer()
+        return
     if command == "ask":
-        if not rest:
-            _err("Usage: python -m src.cli.main ask <question>")
-        # Join remaining args into a single question string.
-        question_text = " ".join(rest)
-        cmd_ask(question_text)
+        # Parse v2.0 flags: --viewer <id> and --allow-full-access.
+        # Any remaining non-flag token is part of the question (joined).
+        viewer_id: str | None = None
+        allow_full = False
+        question_tokens: list[str] = []
+        i = 0
+        while i < len(rest):
+            tok = rest[i]
+            if tok in ("--viewer", "-v") and i + 1 < len(rest):
+                viewer_id = rest[i + 1]
+                i += 2
+                continue
+            if tok == "--allow-full-access":
+                allow_full = True
+                i += 1
+                continue
+            question_tokens.append(tok)
+            i += 1
+        if not question_tokens:
+            _err("Usage: python -m src.cli.main ask <question> [--viewer <id>]")
+        question_text = " ".join(question_tokens)
+        cmd_ask(question_text, viewer_id=viewer_id, allow_full_access=allow_full)
         return
     if command == "evaluate":
         cmd_evaluate()

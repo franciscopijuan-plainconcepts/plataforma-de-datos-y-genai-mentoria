@@ -135,3 +135,157 @@ def test_query_provider_has_execute_readonly_query() -> None:
     assert hasattr(QueryProvider, "execute_readonly_query"), (
         "QueryProvider must expose execute_readonly_query for Text-to-SQL"
     )
+
+
+# --- v2.0 (feature 003): PromptBuilder with SemanticLayerDocument ---
+
+def test_build_prompt_with_semantic_layer_includes_metrics() -> None:
+    """FR-015: when a SemanticLayerDocument is provided, the prompt includes
+    metric names so the LLM can distinguish net vs gross (US3)."""
+    from datetime import datetime, timezone
+
+    from src.ai_engineering.prompt_builder import build_prompt
+    from src.contracts.data_access import ColumnDef, LogicalType, TableDef
+    from src.contracts.dictionary import (
+        DataDictionaryDocument,
+        DictionaryEntry,
+        RelationshipEntry,
+        TableDictionary,
+    )
+    from src.contracts.semantic_layer import (
+        Dimension,
+        Metric,
+        SemanticLayerDocument,
+        SemanticRelationship,
+        TableSemanticClassification,
+    )
+    from src.data_engineering.semantic_layer.metrics import get_metrics
+
+    # Minimal dictionary + table_def.
+    orders_table_dict = TableDictionary(
+        name="Orders",
+        kaggle_label="Transactional Logs",
+        purpose="Orders table.",
+        primary_key=["Row ID"],
+        relationships=[
+            RelationshipEntry(
+                from_column="Region", to_table="People", to_column="Region",
+                cardinality="N:1",
+            ),
+        ],
+        columns=[
+            DictionaryEntry(
+                name="Sales", business_description="Sales amount.",
+                logical_type=LogicalType.DECIMAL,
+                postgres_type="NUMERIC(12,4)", nullable=False,
+                is_key=False, key_kind=None,
+                allowed_values=None, min_value=None, max_value=None,
+                unique_count=0, data_quality_notes=[],
+            ),
+        ],
+    )
+    dictionary = DataDictionaryDocument(
+        generated_at=datetime(2026, 8, 17, tzinfo=timezone.utc),
+        source_file="test", source_sha256="sha",
+        tables=[orders_table_dict],
+    )
+    table_def = TableDef(
+        name="Orders",
+        columns=[
+            ColumnDef(name="Sales", logical_type=LogicalType.DECIMAL,
+                      precision=12, scale=4, nullable=False),
+        ],
+        description="Orders.",
+    )
+    # Minimal semantic layer with one metric so the prompt includes it.
+    semantic_layer = SemanticLayerDocument(
+        version="1.0.0",
+        tables=[
+            TableSemanticClassification(
+                name="Orders", table_type="fact", purpose="Orders.",
+            ),
+        ],
+        metrics=[
+            Metric(
+                name="gross_sales",
+                business_description="Gross sales revenue.",
+                formula_sql='SUM("Sales")',
+                source_table="Orders",
+                aggregation="SUM",
+            ),
+        ],
+        dimensions=[
+            Dimension(
+                name="region", column="Region", source_table="Orders",
+                business_description="Geographic region.",
+                dimension_type="geographic",
+            ),
+        ],
+        relationships=[],
+        source_sha256="sha",
+        semantic_source_sha256="sem-sha",
+        generated_at=datetime(2026, 8, 17, tzinfo=timezone.utc),
+        assumptions=[],
+    )
+    question = NLQuestion(text="Show me gross sales by region")
+    prompt = build_prompt(question, dictionary, table_def, semantic_layer)
+    # The prompt must include the metric name + formula.
+    assert "gross_sales" in prompt
+    assert 'SUM("Sales")' in prompt
+    # The prompt must include the dimension.
+    assert "Region" in prompt
+    # The prompt must use the v2 rules (allow Returns JOIN).
+    assert "Returns" in prompt
+
+
+def test_build_prompt_fallback_without_semantic_layer() -> None:
+    """FR-016: when semantic_layer=None, the prompt falls back to v1.x behavior
+    (no metrics block; Rules forbid Returns references)."""
+    from datetime import datetime, timezone
+
+    from src.ai_engineering.prompt_builder import build_prompt
+    from src.contracts.data_access import ColumnDef, LogicalType, TableDef
+    from src.contracts.dictionary import (
+        DataDictionaryDocument,
+        DictionaryEntry,
+        RelationshipEntry,
+        TableDictionary,
+    )
+
+    orders_table_dict = TableDictionary(
+        name="Orders",
+        kaggle_label="Transactional Logs",
+        purpose="Orders table.",
+        primary_key=["Row ID"],
+        relationships=[],
+        columns=[
+            DictionaryEntry(
+                name="Sales", business_description="Sales amount.",
+                logical_type=LogicalType.DECIMAL,
+                postgres_type="NUMERIC(12,4)", nullable=False,
+                is_key=False, key_kind=None,
+                allowed_values=None, min_value=None, max_value=None,
+                unique_count=0, data_quality_notes=[],
+            ),
+        ],
+    )
+    dictionary = DataDictionaryDocument(
+        generated_at=datetime(2026, 8, 17, tzinfo=timezone.utc),
+        source_file="test", source_sha256="sha",
+        tables=[orders_table_dict],
+    )
+    table_def = TableDef(
+        name="Orders",
+        columns=[
+            ColumnDef(name="Sales", logical_type=LogicalType.DECIMAL,
+                      precision=12, scale=4, nullable=False),
+        ],
+        description="Orders.",
+    )
+    question = NLQuestion(text="Show me total sales")
+    prompt = build_prompt(question, dictionary, table_def, semantic_layer=None)
+    # No semantic layer block present.
+    assert "Semantic Layer" not in prompt
+    assert "gross_sales" not in prompt
+    # v1.x rules (Returns forbidden).
+    assert "Do not reference Returns" in prompt

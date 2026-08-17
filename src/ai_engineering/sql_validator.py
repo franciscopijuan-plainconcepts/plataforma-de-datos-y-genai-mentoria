@@ -112,32 +112,63 @@ def validate_sql(sql: str, table_def: TableDef) -> ValidationResult:
                 sql=sql,
             )
 
-    # 5. Table whitelist: only the target table is allowed.
+    # 5. Table whitelist: orders + returns (v2.0 allows Returns JOIN for
+    #    metric formulas like net_sales). People stays rejected — it is NOT
+    #    a query surface for the LLM (used only internally for viewer->regions).
     #    Extract table names that appear after FROM/JOIN.
     table_refs: set[str] = set()
-    for m in re.finditer(r"\b(?:from|join)\s+([a-zA-Z_][a-zA-Z0-9_]*)", sql_lower):
+    # Also collect table aliases — e.g. "FROM Orders o" -> alias "o";
+    # "JOIN Returns r" -> alias "r". These are valid references and must NOT
+    # be rejected by the column whitelist (they appear in expressions like
+    # o."Sales" or r."Order ID").
+    table_aliases: set[str] = set()
+    for m in re.finditer(
+        r"\b(?:from|join)\s+([a-zA-Z_][a-zA-Z0-9_]*)\s+(?:as\s+)?([a-zA-Z_][a-zA-Z0-9_]*)?",
+        sql_lower,
+    ):
         table_refs.add(m.group(1))
-    # Also check if any other known table names appear. We know the three
-    # tables in the warehouse; reject if Returns or People are referenced.
-    known_other_tables = {"returns", "people"}
+        # The optional second group is the alias (may be None if no alias).
+        if m.group(2) is not None:
+            # Distinguish alias from a following keyword (e.g., "FROM Orders WHERE").
+            # If the second token is a SQL keyword, it's NOT an alias.
+            if m.group(2) not in {
+                "where", "group", "order", "limit", "having", "join", "on",
+                "inner", "left", "right", "outer", "full", "as",
+            }:
+                table_aliases.add(m.group(2))
+    # v2.0: also collect column aliases introduced via `AS` (e.g.,
+    # `SUM(o."Sales") AS net` -> alias "net"). These are not columns and
+    # must not be rejected by the column whitelist.
+    column_aliases: set[str] = set()
+    for m in re.finditer(r"\bas\s+([a-z_][a-z0-9_]*)", sql_lower):
+        column_aliases.add(m.group(1))
+    # Reject People references explicitly.
+    known_other_tables = {"people"}
     for ref in table_refs:
         if ref in known_other_tables:
             return ValidationResult(
                 accepted=False,
-                reason=f"SQL references out-of-scope table: {ref}. v1.x scope is '{table_def.name}' only (other tables are v2.0 scope)",
+                reason=(
+                    f"SQL references out-of-scope table: People. People is the "
+                    "governance mapping table (viewer→regions) and is NOT a query "
+                    "surface for Text-to-SQL. Only Orders (and Returns for net-sales "
+                    "metrics) may be queried."
+                ),
                 sql=sql,
             )
-    # If specific table refs were found, they must all match the target table.
-    target_lower = table_def.name.lower()
+    # If specific table refs were found, they must all match the target table
+    # or the Returns table (v2.0 allows Returns JOIN for metric formulas).
+    allowed_tables = {table_def.name.lower(), "returns"}
     for ref in table_refs:
-        if ref != target_lower:
+        if ref not in allowed_tables:
             return ValidationResult(
                 accepted=False,
-                reason=f"SQL references table: {ref}, but only '{table_def.name}' is allowed",
+                reason=f"SQL references table: {ref}, but only '{table_def.name}' or 'Returns' is allowed",
                 sql=sql,
             )
 
     # 6. Column whitelist: every referenced column must exist.
+    target_lower = table_def.name.lower()
     allowed_columns = {c.name.lower() for c in table_def.columns}
     # SQL keywords/functions that are NOT columns (don't reject these).
     sql_keywords = {
@@ -147,6 +178,10 @@ def validate_sql(sql: str, table_def: TableDef) -> ValidationResult:
         "end", "join", "on", "inner", "left", "right", "outer", "full",
         "sum", "count", "avg", "min", "max", "now", "date", "extract",
         "year", "month", "day", "cast", "coalesce", "true", "false",
+        # v2.0: EXISTS subqueries are now allowed (for Returns detection in
+        #       net-sales-style metrics). Add the keyword so the column
+        #       whitelist does not reject it as a non-existent column.
+        "exists",
     }
     identifiers = _extract_identifiers(normalized)
     for ident in identifiers:
@@ -156,9 +191,20 @@ def validate_sql(sql: str, table_def: TableDef) -> ValidationResult:
             continue
         if ident in allowed_columns:
             continue
-        # It's not a keyword, not the table name, and not a known column — reject.
-        # But only reject if it appears to be a column reference (not a literal).
-        # literals (numbers/strings) won't match the identifier regex.
+        # v2.0: allow identifiers that are table aliases (e.g., "o" in
+        # "FROM Orders o" or "r" in "JOIN Returns r"). These appear in
+        # qualified references like o."Sales" but aren't columns themselves.
+        if ident in table_aliases:
+            continue
+        # v2.0: allow column aliases introduced via AS (e.g., "net" in
+        # `SUM(...) AS net`). These are output column names, not table columns.
+        if ident in column_aliases:
+            continue
+        if ident in allowed_tables:
+            continue
+        # It's not a keyword, not the table name, not an alias, and not a
+        # known column — reject. literals (numbers/strings) won't match the
+        # identifier regex.
         return ValidationResult(
             accepted=False,
             reason=f"SQL references non-existent column: {ident} (allowed: {sorted(allowed_columns)})",

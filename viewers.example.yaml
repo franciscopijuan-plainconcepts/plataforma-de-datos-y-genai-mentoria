@@ -1,0 +1,61 @@
+# viewers.example.yaml — Semantic Layer viewer configuration template.
+#
+# DEFAULT BEHAVIOR: `ask --viewer <id>` resolves a real person from the
+# `People` table (the canonical governance mapping) and uses that person's
+# region. You do NOT need to maintain a YAML entry per person — the system
+# reads the People table directly to log the user in:
+#
+#     uv run python -m src.cli.main ask --viewer marilene_rousseau "total sales"
+#     uv run python -m src.cli.main ask --viewer "Marilène Rousseau" "total sales"
+#     uv run python -m src.cli.main ask --viewer "Marilene Rousseau" "total sales"
+#
+# This file is the FALLBACK for viewers that don't correspond to a real
+# person in People (e.g., escape hatches, role-based access, CI service
+# accounts). When `--viewer <id>` does not match any row in People, the
+# system looks for `<id>` in this file.
+#
+# Copy this file to `viewers.yaml` (gitignored — local only) and edit:
+#     cp viewers.example.yaml viewers.yaml
+#
+# Or point SEMANTIC_VIEWERS_FILE at an alternative path.
+#
+# Each viewer entry:
+#   id                  : viewer identifier (snake_case; used by `ask --viewer <id>`)
+#   regions             : list of `Orders."Region"` values the viewer may see.
+#                         Empty list + allows_full_access=false => viewer sees 0 rows.
+#   allows_full_access   : if true, the resolver skips RLS filtering. ONLY effective
+#                         when ENV in {local, dev, test}; otherwise it is ignored
+#                         (forced to false) — governance is non-negotiable.
+#
+# The set of valid region values is the unique set of `Orders."Region"` values
+# (23 unique, see `data_dictionary.md`):
+# Africa, ASEAN, Atlantic, Australia and Oceania, Canada, Caribbean,
+# Central Africa, Central America, Central Asia, Central US, Eastern Africa,
+# Eastern Asia, Eastern Europe, Eastern US, Europe, North Africa, North Asia,
+# Northern Europe, Oceania, South America, Southeastern Asia, Southern Africa,
+# Southern Asia, Southern Europe, Western Africa, Western Asia, Western Europe,
+# Western US.
+
+viewers:
+  - id: alice
+    regions:
+      - Caribbean
+      - Central America
+    allows_full_access: false
+
+  - id: bob
+    regions:
+      - Central US
+      - Western US
+    allows_full_access: false
+
+  - id: caribbean_only
+    regions:
+      - Caribbean
+    allows_full_access: false
+
+  # Local-dev escape hatch. Only honored when ENV in {local, dev, test}.
+  # In any other environment, allows_full_access is forced to false by the registry.
+  - id: admin_dev
+    regions: []
+    allows_full_access: true
