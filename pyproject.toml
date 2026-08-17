@@ -11,6 +11,7 @@ dependencies = [
     "pydantic>=2.7",
     "openai>=2.53.0",
     "python-dotenv>=1.2.2",
+    "pyyaml>=6.0",
 ]
 
 [project.optional-dependencies]
@@ -55,6 +56,10 @@ ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
 module = "psycopg.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "yaml.*"
 ignore_missing_imports = true
 
 # numpy's bundled stubs use syntax that requires a recent mypy/python combo;

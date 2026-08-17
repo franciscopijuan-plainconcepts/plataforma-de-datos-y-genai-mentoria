@@ -41,6 +41,9 @@ _ALLOWED_PANDAS_DIRS = {
 }
 _ALLOWED_PSYCOPG_DIR = _REPO_ROOT / "src" / "data_access" / "adapters" / "postgres"
 _ALLOWED_OPENAI_DIR = _REPO_ROOT / "src" / "ai_engineering"
+# v2.0 Semantic Layer: `pyyaml` is confined to the registry module (it parses
+# viewers.yaml). No other domain may import it (constitution Principle III).
+_ALLOWED_YAML_DIR = _REPO_ROOT / "src" / "data_engineering" / "semantic_layer"
 
 
 def _iter_python_files(root: Path) -> list[Path]:
@@ -198,3 +201,71 @@ def test_protocols_have_no_execute_sql_escape_hatch() -> None:
         assert not hasattr(protocol, "execute_sql"), (
             f"{protocol.__name__} must NOT expose execute_sql (raw SQL escape hatch)"
         )
+
+
+# ---------------------------------------------------------------------------
+# Boundary 5 (v2.0): pyyaml confined to data_engineering/semantic_layer
+# ---------------------------------------------------------------------------
+
+def test_pyyaml_confined_to_semantic_layer_registry() -> None:
+    """`yaml` MUST NOT be imported outside the Semantic Layer registry module.
+
+    Constitution Principle III: pyyaml is a config-parsing dependency, confined
+    to `src/data_engineering/semantic_layer/registry.py`. Other modules must
+    receive viewers via typed SemanticViewer models, never by importing yaml.
+    """
+    src_root = _REPO_ROOT / "src"
+    offenders: list[str] = []
+    for py_file in _iter_python_files(src_root):
+        if "yaml" not in _top_level_modules(py_file):
+            continue
+        if _is_under(py_file, {_ALLOWED_YAML_DIR}):
+            continue  # permitted location
+        offenders.append(str(py_file.relative_to(_REPO_ROOT)))
+    assert not offenders, (
+        f"yaml imported outside the Semantic Layer registry directory: {offenders}. "
+        f"Only {_ALLOWED_YAML_DIR} may import pyyaml."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Boundary 6 (v2.0): no caller of execute_readonly_query in ai_engineering
+# reaches an adapter by direct import (RLS enforcement, Principle IV).
+# ---------------------------------------------------------------------------
+
+def test_no_ai_engineering_direct_adapter_import() -> None:
+    """No `src/ai_engineering/` module imports the PG adapter directly.
+
+    Constitution Principle IV (NON-NEGOTIABLE): LLM-generated SQL MUST run
+    through the `QueryProvider` Protocol so the `GovernedQueryProvider`
+    decorator can apply RLS. Importing the adapter directly would bypass
+    governance. Asserts via AST that none of the guarded symbols are imported
+    in `src/ai_engineering/`.
+    """
+    ai_root = _REPO_ROOT / "src" / "ai_engineering"
+    forbidden_modules = {
+        "psycopg",
+        "src.data_access.adapters.postgres.repository",
+        "src.data_access.adapters.postgres.connection",
+    }
+    offenders: list[str] = []
+    for py_file in _iter_python_files(ai_root):
+        modules = _top_level_modules(py_file)
+        # Also check full dotted module names for relative imports of the adapter.
+        try:
+            tree = ast.parse(py_file.read_text(encoding="utf-8"))
+        except SyntaxError:
+            continue
+        full_modules: set[str] = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom):
+                if node.module is not None:
+                    full_modules.add(node.module)
+        combined = modules | full_modules
+        for forbidden in forbidden_modules:
+            if forbidden in combined:
+                offenders.append(f"{py_file.relative_to(_REPO_ROOT)} imports {forbidden!r}")
+    assert not offenders, (
+        "ai_engineering bypasses the QueryProvider Protocol by importing the "
+        f"adapter directly — constitution Principle IV violation: {offenders}."
+    )

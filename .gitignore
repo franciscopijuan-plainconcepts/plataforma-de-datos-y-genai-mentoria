@@ -21,6 +21,11 @@ ENV/
 .env.*
 !.env.example
 
+# --- Semantic Layer viewer config (local only) ---
+# Contains viewer/region mappings possibly referencing real people.
+# The example template is committed; the real config is local-only.
+viewers.yaml
+
 # --- Type-checker / test caches ---
 .mypy_cache/
 .pytest_cache/
