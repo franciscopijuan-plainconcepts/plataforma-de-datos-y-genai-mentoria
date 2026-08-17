@@ -34,12 +34,25 @@ Define el contexto de gobernanza de un usuario activo. Se construye en runtime (
 
 | Field | Type | Semantics |
 |---|---|---|
-| `viewer_id` | `str` | Identificador (`alice`, `admin_dev`, ...). Matchea un entry en `viewers.yaml`. |
+| `viewer_id` | `str` | Identificador. Login-as-person: snake_case del nombre (`marilene_rousseau`); YAML fallback: ID del entry (`admin_dev`). |
 | `regions` | `list[str]` | Regiones con acceso. Vacío + `allows_full_access=False` → `WHERE FALSE` (no ve nada). |
 | `allows_full_access` | `bool` | Si `True`, el resolver NO filtra (solo efectivo cuando `is_local_dev=True`). |
 | `is_local_dev` | `bool` | Computado: `ENV in {local, dev, test}`. Si `False`, `allows_full_access` se fuerza a `False`. |
 
-Ver [data-model.md](../data-model.md) § 4 para los field-level details + validation rules.
+**Resolution model (v2.0 final)**: el CLI `ask --viewer <value>` resuelve el `SemanticViewer` con la siguiente prioridad:
+
+1. **`PeopleViewerResolver`** (default) — consulta la tabla `People` y construye el
+   viewer con `viewer_id` snake_case derivado del nombre real de la persona, y
+   `regions = [People.Region]`. Acepta 3 formas de lookup: `marilene_rousseau`
+   (snake), `Marilène Rousseau` (con acento), `Marilene Rousseau` (sin acento).
+2. **`ViewerRegistry`** (fallback `viewers.yaml`) — para escape hatches como
+   `admin_dev`, roles `sales_eu`, o cuentas CI que no corresponden a una
+   persona real en People.
+3. **Fail-fast** — si no matchea ninguno, error claro listando las personas
+   disponibles en People.
+
+Ver [data-model.md](../data-model.md) § 4 para los field-level details + validation rules,
+y [research.md](../research.md) Part C para el rationale del modelo de login-as-person.
 
 ### `SemanticQueryResolverProtocol` — interfaz del resolver (en `src/contracts/semantic_layer.py`)
 
@@ -60,13 +73,19 @@ class SemanticQueryResolverProtocol(Protocol):
         viewer: SemanticViewer,
         table_def: TableDef,
     ) -> str:
-        """Return the SQL wrapped with a `Region IN (viewer.regions)` filter.
+        """Inject the `Region IN (viewer.regions)` predicate into the validated SQL.
 
-        Implementation: wraps the input SQL in a subquery and applies an
-        outer `WHERE "Region" IN (...)` (see research.md Part A). If the
-        viewer has no regions and `allows_full_access=False`, returns SQL
-        that produces 0 rows (the outer WHERE is `FALSE`). If
-        `allows_full_access=True` and `is_local_dev=True`, logs a
+        Implementation (final v2.0 — see research.md Part A): INJECTS the
+        `WHERE "Region" IN (...)` predicate directly into the LLM SQL —
+        ANDing any existing WHERE, or introducing a new WHERE before
+        GROUP BY / ORDER BY / LIMIT. This is robust for aggregation
+        queries like `SELECT SUM("Sales") FROM Orders` (whose outer
+        projection doesn't expose Region, breaking the initial subquery-
+        wrapping approach).
+        If the viewer has no regions and `allows_full_access=False`,
+        returns SQL that produces 0 rows (the path uses subquery wrapping
+        with `WHERE FALSE` because there's no projection dependency).
+        If `allows_full_access=True` and `is_local_dev=True`, logs a
         `gov.bypass` event and returns the SQL unfiltered.
         """
         ...
@@ -107,22 +126,30 @@ Serializa el `SemanticLayerDocument` a los dos artefactos. Pure function pair.
 
 ## Registry — `ViewerRegistry` (en `src/data_engineering/semantic_layer/registry.py`)
 
-Carga viewers desde `viewers.yaml` (path override via `SEMANTIC_VIEWERS_FILE`).
+Loads viewers from `viewers.yaml` (path override via `SEMANTIC_VIEWERS_FILE`).
+**Nota (v2.0 final)**: este es el fallback cuando `PeopleViewerResolver` no
+matchea una persona. El flujo de resolución completo del CLI es:
+
+1. `PeopleViewerResolver.resolve(viewer_value)` — busca en People (default).
+2. `ViewerRegistry.get_viewer(viewer_id)` — busca en YAML (fallback).
+3. Fail-fast si ninguno matchea.
+
+See [research.md](../research.md) Part C for the login-as-person model details.
 
 | Method | Input | Output | Semantics |
 |---|---|---|---|
-| `load_viewers(path: Path \| None = None) -> list[SemanticViewer]` | `path` (default: `viewers.yaml` o `SEMANTIC_VIEWERS_FILE`) | `list[SemanticViewer]` | Parsea el YAML, construye `SemanticViewer` models. Para cada viewer, computa `is_local_dev = ENV in {local, dev, test}` y si `allows_full_access=True` pero `is_local_dev=False`, lo flipa a `False`. |
-| `get_viewer(viewer_id: str, path: Path \| None = None) -> SemanticViewer` | `viewer_id` + path | `SemanticViewer` | Devuelve el viewer matching `viewer_id`. Raise `ValueError` si no existe, listando los IDs disponibles. |
+| `load_viewers(path)` | `Path \| None` (default: `viewers.yaml` o `SEMANTIC_VIEWERS_FILE`) | `list[SemanticViewer]` | Parsea el YAML, construye `SemanticViewer` models. Para cada viewer, computa `is_local_dev = ENV in {local, dev, test}` y si `allows_full_access=True` pero `is_local_dev=False`, lo flipa a `False`. |
+| `get_viewer(viewer_id, path)` | `viewer_id` + path | `SemanticViewer` | Devuelve el viewer matching `viewer_id`. Raise `ValueError` si no existe, listando los IDs disponibles. |
 
-**Boundary rule**: importa `pyyaml`. No DB, no LLM. Es pure (file I/O es unavoidable para load config, pero no muta state).
+**Boundary rule**: importa `pyyaml`. No DB, no LLM. Pure (file I/O es unavoidable para load config, pero no muta state).
 
 ## Resolver Implementation — `SemanticQueryResolver` (en `src/data_engineering/semantic_layer/resolver.py`)
 
-Implementa `SemanticQueryResolverProtocol` via subquery wrapping (research.md Part A).
+Implementa `SemanticQueryResolverProtocol` via predicate injection (research.md Part A, versión final tras corrección del subquery wrapping original).
 
 | Method | Input | Output | Semantics |
 |---|---|---|---|
-| `apply_rls(sql, viewer, table_def) -> str` | `str` SQL validado, `SemanticViewer`, `TableDef` | `str` SQL gobernado | Si `viewer.allows_full_access` → loguea `gov.bypass` y devuelve SQL original. Si `viewer.regions = []` → `SELECT * FROM ({sql}) AS _gov WHERE FALSE`. Else → `SELECT * FROM ({sql}) AS _gov WHERE "Region" IN ('R1', 'R2', ...)`. |
+| `apply_rls(sql, viewer, table_def) -> str` | `str` SQL validado, `SemanticViewer`, `TableDef` | `str` SQL gobernado | Si `viewer.allows_full_access` → loguea `gov.bypass` y devuelve SQL original. Si `viewer.regions = []` → `SELECT * FROM ({sql}) AS _gov WHERE FALSE` (subquery wrap aquí sí es OK porque no hay proyección externa). Else → **inyecta** `AND "Region" IN ('R1', 'R2', ...)` en el WHERE existente, o `WHERE "Region" IN (...)` antes de GROUP BY/ORDER BY/LIMIT si no hay WHERE. |
 
 **Boundary rule**: pure function. No DB, no LLM, no file I/O. El log de government-bypass va a un logger injected (no abre files directo). El `table_def` se usa para sanity-check (la tabla principal es `Orders`, que tiene `Region`).
 

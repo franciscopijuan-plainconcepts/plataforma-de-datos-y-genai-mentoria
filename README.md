@@ -34,8 +34,12 @@ A Data and GenAI Platform that connects Generative AI to a Data Warehouse.
 - Row-Level Security (RLS) enforced at the Semantic Layer boundary per
   constitution Principle IV (NON-NEGOTIABLE). No LLM-generated SQL can bypass
   `WHERE "Region" IN (viewer.regions)` filtering.
-- Viewer-based governance: configure `viewers.yaml`, then `ask --viewer alice`
-  scopes results to Alice's regions.
+- Viewer-based governance: configure `viewers.yaml` (optional, only for escape
+  hatches like `admin_dev`), then `ask --viewer alice` scopes results to
+  Alice's regions. By default, `ask --viewer <person>` resolves a real person
+  from the `People` table (e.g., `marilene_rousseau`, `Marilène Rousseau`,
+  or `Marilene Rousseau`) and uses that person's region — no YAML needed for
+  real-person logins.
 - Prompt enrichment: when the Semantic Layer is loaded, the prompt includes
   metrics + dimensions + Returns-join notes so the LLM distinguishes
   gross_sales from net_sales.
@@ -54,9 +58,10 @@ A Data and GenAI Platform that connects Generative AI to a Data Warehouse.
 - [`uv`](https://docs.astral.sh/uv/) (manages Python and dependencies).
 - The source file `Global Superstore Data.xlsx` in the repository root.
 - A `.env` file with `FORGE_API_KEY` set (copy `.env.example` and fill it).
-- For Semantic Layer RLS: a `viewers.yaml` file describing your viewers
-  (copy `viewers.example.yaml` and edit). Optional — required only for
-  the `ask --viewer <id>` command.
+- For Semantic Layer RLS: real-person viewers resolve directly from the
+  `People` table (e.g., `--viewer marilene_rousseau`); no YAML needed.
+  A `viewers.yaml` file is only required for escape hatches like `admin_dev`
+  (copy `viewers.example.yaml` if you need them).
 
 ## Quickstart
 
@@ -77,8 +82,10 @@ uv run python -m src.cli.main generate-dictionary
 uv run python -m src.cli.main generate-semantic-layer
 
 # 6. Ask a natural-language question (RLS-scoped by the active viewer)
-cp viewers.example.yaml viewers.yaml   # one-time viewer config (local-only)
-uv run python -m src.cli.main ask --viewer alice "What is the total sales amount?"
+#    Login as a real person (resolved from the People table — no YAML needed):
+uv run python -m src.cli.main ask --viewer marilene_rousseau "What is the total sales amount?"
+#    Or escape-hatch in local/dev (no RLS):
+# uv run python -m src.cli.main ask --allow-full-access "What is the total sales amount?"
 
 # 7. Tear down the environment when done
 uv run python -m src.cli.main teardown

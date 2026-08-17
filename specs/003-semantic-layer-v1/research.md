@@ -16,30 +16,53 @@
 
 ---
 
-## Part A — RLS Strategy: Subquery Wrapping (NO regex WHERE rewrite)
+## Part A — RLS Strategy: Predicate Injection (no subquery wrapping)
 
-### Decision: Envolver el SQL en una subquery con `WHERE Region IN (...)` externo
+### Decision: Inyectar `WHERE "Region" IN (...)` directamente dentro del SQL del LLM
 
-**Decision**: El `SemanticQueryResolver.apply_rls(sql, viewer, table_def)` devuelve:
+**Decision (implementación final, post-corrección de la versión inicial de subquery wrapping)**: El
+`SemanticQueryResolver.apply_rls(sql, viewer, table_def)` **inyecta** el predicado
+`"Region" IN ('R1', 'R2', ...)` directamente en el SQL generado por el LLM,
+AND-ando el `WHERE` existente o introduciendo un `WHERE` nuevo antes de
+`GROUP BY` / `ORDER BY` / `LIMIT` / fin-de-query. El `_wrap_false` path (viewer
+con `regions: []`) sigue usando subquery wrapping con `WHERE FALSE` por
+robustez.
 
-```sql
-SELECT * FROM (
-    <original_sql>
-) AS _gov
-WHERE "Region" IN ('R1', 'R2', ...)
-```
-
-Donde `<original_sql>` es el SQL generado por el LLM y ya validado por el `SqlValidator` (que garantiza: SELECT-only, single-statement, no comments, no forbidden keywords, Orders-only-table-naming, existing-columns-only).
+Donde `<original_sql>` es el SQL generado por el LLM y ya validado por el
+`SqlValidator` (que garantiza: SELECT-only, single-statement, no comments, no
+forbidden keywords, Orders+Returns-only-table-naming, existing-columns-only).
 
 **Rationale**:
 
-- **No dependency on SQL parsing** — el `SqlValidator` ya garantiza que el SQL es un SELECT sobre `Orders` (con posibilidad de JOIN a `Returns` para métricas derivadas en esta feature). Envolverlo en una subquery con un WHERE externo es **composicionalmente seguro**: PostgreSQL lo ejecuta sin ambigüedad.
-- **Robusto frente a WHERE existente** — si el LLM genera `SELECT ... FROM Orders WHERE Region = 'X'`, el wrapping resulta en `SELECT * FROM (SELECT ... WHERE Region = 'X') AS _gov WHERE "Region" IN ('R1', 'R2')` — la intersección natural (el viewer no ve regiones fuera de scope aunque el SQL las pida). Está alineado con la acceptance scenario 2 del US2.
-- **Robusto frente a GROUP BY / ORDER BY / LIMIT** — el wrapper externo solo filtra filas; los `GROUP BY`, `ORDER BY`, `LIMIT`, aggregaciones del inner SQL quedan intactos. El wrapper no rompe la semántica de la consulta original.
-- **Robusto frente a aggregaciones sin `Region` en SELECT** — si la query es `SELECT SUM(Sales) FROM Orders` (sin `Region` en SELECT ni GROUP BY), el wrapper añade `WHERE "Region" IN (...)` al outer y PostgreSQL lo propaga al inner via predicate pushdown (la columna `Region` existe en `Orders` y es accesible desde la subquery). Validado en tests de integración.
-- **El alias `_gov` es estable** y nunca chocará con un alias del usuario (que tendría que ser `_gov` lowercase literal, extremadamente improbable y de todos modos el `SqlValidator` puede bloquearlo).
-- **Case-sensitivity**: PostgreSQL dobla los identifiers no-comillados a lowercase; los identifiers del dataset son title-case (`"Region"`). El resolver SIEMPRE usa `Region` quoted con double-quotes para matchear la convención del dataset y del `SqlValidator` existente (que ya fuerza quoting en el prompt de 002).
-- **Consistencia con el `SqlValidator`**: la feature 002 ya valida single-statement + SELECT-only + Orders-only. El resolver confía en esa garantía previa. Si un día se amplía la validación, el resolver se mantiene — el wrapper sigue siendo composicionalmente válido para cualquier SELECT.
+- **Bug reportado en la versión inicial (subquery wrapping)**: la versión
+  inicial hacía `SELECT * FROM (<sql>) AS _gov WHERE "Region" IN (...)`.
+  Esto fallaba para aggregaciones como `SELECT SUM("Sales") FROM Orders` — el
+  inner SELECT no expone la columna `Region` en su proyección outer, así que
+  el `WHERE "Region" IN (...)` del wrapper exterior no la encontraba y lanza
+  `column "Region" does not exist`. La inyección directa resuelve esto porque
+  el predicado se aplica sobre la tabla `Orders` directamente en el inner query.
+- **Robusto frente a WHERE existente** — si el LLM genera
+  `SELECT ... FROM Orders WHERE "Region" = 'X'`, la inyección resulta en
+  `SELECT ... FROM Orders WHERE "Region" = 'X' AND "Region" IN ('R1', 'R2')`
+  — la intersección natural (el viewer no ve regiones fuera de scope aunque
+  el SQL las pida). Alineado con acceptance scenario 2 del US2.
+- **Robusto frente a GROUP BY / ORDER BY / LIMIT** — la inyección del predicado
+  se inserta **antes** del primer `GROUP BY` / `ORDER BY` / `HAVING` / `LIMIT`
+  / `OFFSET` que se encuentre después del WHERE, así que el orden de cláusulas
+  queda válido SQL. Tested en `test_semantic_resolver.py`.
+- **Predicado pushdown** — al estar el predicado en el inner query, PostgreSQL
+  lo empuja automáticamente al scan de `Orders`, eficiente sin plan extra.
+- **Case-sensitivity**: PostgreSQL dobla los identifiers no-comillados a
+  lowercase; los identifiers del dataset son title-case (`"Region"`). El
+  resolver SIEMPRE usa `"Region"` quoted con double-quotes para matchear la
+  convención del dataset y del `SqlValidator` existente.
+- **Consistencia con el `SqlValidator`**: la feature 002 ya valida single-
+  statement + SELECT-only + Orders-only (+ Returns JOIN desde v2.0). El
+  resolver confía en esa garantía previa para que el regex de inserción del
+  predicado sea seguro (la estructura del SQL es predecible).
+- **Sobrevive íntegro dentro de EXISTS subqueries**: si el SQL del LLM tiene un
+  subquery con `EXISTS (SELECT 1 FROM Returns ...)`, el predicado se inserta
+  en el WHERE outer — el subquery EXISTS queda intacto. Test cubre este caso.
 
 ### Alternatives consideradas
 
@@ -51,13 +74,15 @@ Donde `<original_sql>` es el SQL generado por el LLM y ya validado por el `SqlVa
 
 | Input | Output esperado |
 |---|---|
-| `SELECT * FROM Orders` (viewer regions: `[R1]`) | `SELECT * FROM (SELECT * FROM Orders) AS _gov WHERE "Region" IN ('R1')` |
-| `SELECT SUM(Sales) FROM Orders` (viewer: `[R1, R2]`) | `SELECT * FROM (SELECT SUM(Sales) FROM Orders) AS _gov WHERE "Region" IN ('R1', 'R2')` ← PostgreSQL propaga el filtro a la subquery via pushdown |
-| `SELECT Region, SUM(Sales) FROM Orders GROUP BY Region` (viewer: `[R1]`) | `SELECT * FROM (...) AS _gov WHERE "Region" IN ('R1')` ← ok |
-| `SELECT * FROM Orders WHERE Region = 'R3'` (viewer: `[R1, R2]`) | wrapper → 0 filas (intersección vacía) — correcto, el viewer no ve R3 |
-| Viewer con `regions: []` | `SELECT * FROM (...) AS _gov WHERE "Region" IN ()` es inválido; el resolver devuelve `SELECT * FROM (original) AS _gov WHERE FALSE` (devuelve 0 filas, PostgreSQL válido) |
-| Viewer con `allows_full_access: True` (solo en ENV local/dev) | Devuelve el SQL original sin wrapper + loguea `gov.bypass` |
-| SQL con `;` final | El `SqlValidator` ya lo habría rechazado (002); el resolver asume SQL limpio |
+| `SELECT * FROM Orders` (viewer: `[R1]`) | `SELECT * FROM Orders WHERE "Region" IN ('R1')` |
+| `SELECT SUM("Sales") FROM Orders` (viewer: `[R1, R2]`) | `SELECT SUM("Sales") FROM Orders WHERE "Region" IN ('R1', 'R2')` ← funciona con inyección directa (no wrap) |
+| `SELECT "Region", SUM("Sales") FROM Orders GROUP BY "Region"` (viewer: `[R1]`) | `SELECT "Region", SUM("Sales") FROM Orders WHERE "Region" IN ('R1') GROUP BY "Region"` |
+| `SELECT * FROM Orders WHERE "Region" = 'R3'` (viewer: `[R1, R2]`) | `SELECT * FROM Orders WHERE "Region" = 'R3' AND "Region" IN ('R1', 'R2')` (intersección vacía → 0 filas; el viewer no ve R3) |
+| `SELECT * FROM Orders ORDER BY "Sales" LIMIT 10` (viewer: `[R1]`) | `SELECT * FROM Orders WHERE "Region" IN ('R1') ORDER BY "Sales" LIMIT 10` (predicado antes del ORDER BY) |
+| Viewer con `regions: []` y `allows_full_access=False` | `SELECT * FROM (<sql>) AS _gov WHERE FALSE` (devuelve 0 filas, PostgreSQL válido; subquery wrap aquí sí es OK porque no hay proyección externa que dependa de "Region") |
+| Viewer con `allows_full_access=True` (solo en ENV local/dev) | Devuelve el SQL original sin inyección + loguea `gov.bypass` |
+| SQL con `;` final | El `SqlValidator` ya lo habría dejado pasar; el resolver lo stripea antes de inyectar |
+| SQL con `EXISTS (SELECT 1 FROM Returns WHERE ...)` | El predicado `Region IN` se inserta en el WHERE outer; el EXISTS subquery queda intacto dentro del body del SQL |
 
 ### Implementación (esqueleto)
 
@@ -144,53 +169,132 @@ def build_prompt(
 
 ---
 
-## Part C — Viewer Configuration Format: YAML
+## Part C — Viewer Resolution: "Login as Person" (default) + YAML fallback
 
-### Decision: `viewers.yaml` con `pyyaml` (nueva dependencia liviana)
+### Decision: La tabla People es el source of truth para personas reales; `viewers.yaml` queda como fallback para escape hatches
 
-**Decision**: Los viewers se configuran en un archivo `viewers.yaml`:
+**Decision (implementación final, post-mejora del modelo inicial YAML-only)**: el CLI
+`ask --viewer <value>` resuelve primero una **persona real** desde la tabla `People`
+(el mapping governance canónico por constitution Principle IV) usando
+`PeopleViewerResolver`, y solo cae al `viewers.yaml` si el valor no matchea
+una persona. Esto elimina la necesidad de mantener duplicado el mapping
+`person → region` a mano en YAML.
+
+#### Resolución de viewer (orden de prioridad)
+
+1. **`PeopleViewerResolver` (default, login-as-person)** — consulta la tabla
+   `People` (cacheada en memoria por proceso) y resuelve un `SemanticViewer`
+   con `viewer_id` derivado del nombre de la persona (normalized a
+   snake_case) y `regions = [<region_de_People>]`. Accepta tres formas de
+   lookup para maximizar la naturalidad del "login":
+   - snake_case normalized ID: `marilene_rousseau`
+   - Nombre completo con acentos: `Marilène Rousseau`
+   - Nombre sin acentos: `Marilene Rousseau`
+2. **`ViewerRegistry` (fallback `viewers.yaml`)** — si `--viewer <value>` no
+   matchea ninguna persona en People, el CLI busca `<value>` en
+   `viewers.yaml`. Esto preserva los escape hatches (e.g., `admin_dev` para
+   bypass en local/dev) y los viewers basados en rol (e.g., `sales_eu`) que
+   no correspondan a una persona específica.
+3. **Fail-fast** — si ninguno de los dos matchea, el CLI lanza un error
+   claro listando los IDs disponibles en People, y sugiere editar el
+   `viewers.yaml` para casos custom.
+
+#### Ejemplo de flujo
+
+```bash
+uv run python -m src.cli.main ask --viewer marilene_rousseau 'total sales'
+# → PeopleViewerResolver lee People, encuentra `Marilène Rousseau -> Caribbean`,
+#   construye SemanticViewer(viewer_id='marilene_rousseau', regions=['Caribbean'])
+
+uv run python -m src.cli.main ask --viewer 'Marilène Rousseau' 'total sales'
+# → misma persona, lookup por nombre completo con acento
+
+uv run python -m src.cli.main ask --viewer admin_dev 'total sales'
+# → PeopleViewerResolver no matchea → cae a ViewerRegistry → encuentra en YAML
+#   como allows_full_access=true (solo efectivo si ENV in {local, dev, test})
+```
+
+#### Carga inicial de People
+
+`PeopleViewerResolver._load_cache()` hace una única query contra `People`:
+
+```python
+SELECT "Person", "Region" FROM "People"
+```
+
+usando el `PostgresRepository` *ungoverned* (sin `GovernedQueryProvider` en
+medio, porque `People` ES el mapping y no tiene sentido scoping por regiones).
+El resultado se cachea en memoria para todo el lifetime del proceso — así
+`evaluate` corriendo ~10 preguntas no re-query la tabla 10 veces.
+
+#### Rationale
+
+- **Single source of truth**: `People` *es* el mapping `person → region`.
+  Duplicarlo en `viewers.yaml` es aguardar problemas cuando una persona
+  cambia de región o se agrega una nueva.
+- **Login natural**: el usuario se identifica por su nombre real
+  (`marilene_rousseau`) en vez de un ID artificial (`alice`).
+- **Sin mantenimiento**: cuando una persona se cambia de región en el
+  dataset, el modelo automáticamente usará la nueva región — no hay que
+  actualizar un file YAML local.
+- **Backward compatible**: el modelo YAML original sigue disponible como
+  fallback para casos que no resuelven a una persona (escape hatches, CI
+  service accounts, roles).
+
+### Formato `viewers.yaml` (cuando se usa como fallback)
 
 ```yaml
-# viewers.yaml — local, gitignored. Copy viewers.example.yaml to viewers.yaml and edit.
+# viewers.yaml — local, gitignored. Solo necesario para escape hatches
+# (no para personas reales — esas se resuelven via People table).
 viewers:
-  - id: alice
-    regions:
-      - Caribbean
-      - Central America
-    allows_full_access: false
-  - id: bob
-    regions:
-      - Central US
-      - Western US
-    allows_full_access: false
   - id: admin_dev
     regions: []
     allows_full_access: true     # Solo efectivo cuando ENV in {local, dev, test}
-  - id: caribbean_only
+  - id: sales_eu
     regions:
-      - Caribbean
+      - Western Europe
+      - Eastern Europe
+      - Northern Europe
+      - Southern Europe
     allows_full_access: false
+  - id: ci_account
+    regions: []
+    allows_full_access: false    # Sin acceso a ninguna región (CI smoke test)
 ```
 
-Cargado por `src/data_engineering/semantic_layer/registry.py` con `pyyaml`. El path se resuelve:
+Cargado por `src/data_engineering/semantic_layer/registry.py` con `pyyaml`.
+El path se resuelve:
 
 1. `SEMANTIC_VIEWERS_FILE` env var (si está seteada → usar ese path).
 2. Default: `viewers.yaml` en el cwd (raíz del proyecto).
-3. Si no existe → el CLI falla rápido con un error claro listando cómo crearlo (apunta al `viewers.example.yaml`).
+3. Si no existe → el CLI falla rápido con un error claro listando cómo crearlo
+   (apunta al `viewers.example.yaml`).
 
-### Rationale
+### Rationale histórico (por quéOriginalmente se seleccionó YAML)
 
-- **YAML sobre JSON**: YAML permite comentarios (`#`), mejor lectura para config humana, y multiline strings limpios. JSON no tiene comentarios — para un archivo que la persona va a editar frecuentemente, YAML gana.
-- **YAML sobre `.env`**: `.env` es ok para pares k=v pero no escala a listas de regions por viewer. YAML estructura nativamente.
-- **`pyyaml` es estándar**: ampliamente usado, mantenida, zero-surprise. Mismo coste que cualquier otra librería de parsing.
-- **`.example.yaml` committed**: el `viewers.example.yaml` se commitea como template; el `viewers.yaml` real se agrega a `.gitignore` (contiene nombres de personas del negocio, incluso si son sample synthesize).
+- **YAML sobre JSON**: YAML permite comentarios (`#`), mejor lectura para config
+  humana, y multiline strings limpios.
+- **YAML sobre `.env`**: `.env` es ok para pares k=v pero no escala a listas de
+  regions por viewer. YAML estructura nativamente.
+- **`pyyaml` es estándar**: ampliamente usado, mantenida, zero-surprise.
+- **`.example.yaml` committed**: el `viewers.example.yaml` se commitea como
+  template; el `viewers.yaml` real se agrega a `.gitignore`.
 
-### Alternatives consideradas
+### Alternatives consideradas (al modelo de login-as-person)
 
-- **`.env` con `VIEWER_ALICE_REGIONS="Caribbean,Central America"`**: verbs y no escala. Rechazado.
+- **Sólo YAML (el original)**: rompe el source-of-truth principle (People mapea
+  las regiones, se duplica en YAML). Rechazado.
+- **Sólo People, sin YAML fallback**: rompe los escape hatches (admin_dev,
+  CI accounts, roles custom). Inflexible. Rechazado.
+- **OIDC / JWT real**: fuera de scope (v2.0 local-only). Deferred a v3.0+.
+- **`.env` con `VIEWER_MARILENE_REGION=Caribbean`**: no escala a listas de
+  regiones y por cada persona. Rechazado.
+
+### Alternatives consideradas (al formato YAML del archivo de fallback)
+
+- **`.env` con `VIEWER_ADMIN_DEV_REGIONS=...`**: no escala a listas. Rechazado.
 - **JSON**: igual expresividad pero sin comentarios. YAML preferido.
-- **TOML**: posible pero menos familiar en data engineering; `pyyaml` es más estándar para este caso.
-- **Definir viewers en código (`registry.py`)**: rompe la reproducibilidad across runs y deployments. Rechazado.
+- **TOML**: posible pero menos familiar en data engineering. No seleccionado.
 
 ---
 

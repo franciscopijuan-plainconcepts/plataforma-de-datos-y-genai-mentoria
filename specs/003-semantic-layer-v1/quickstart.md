@@ -37,31 +37,35 @@ uv sync
 
 **Expected**: `pyyaml` está en el lockfile; `uv sync` termina sin errores.
 
-### 2. Crear el archivo de viewers (local, gitignored)
+### 2. Crear el archivo de viewers (opcional — solo se usa como fallback)
+
+A partir de v2.0 (post-mejora del modelo de login), `--viewer <id>` resuelve
+**personas reales** directamente desde la tabla `People` por defecto. El
+archivo `viewers.yaml` solo es necesario para escape hatches (e.g., un
+viewer `admin_dev` que no corresponde a una persona real).
 
 ```bash
+# Opcional — solo si necesitás escape hatches / roles / CI accounts:
 cp viewers.example.yaml viewers.yaml
-# Editar viewers.yaml con tus viewers locales. Ejemplo:
+# Editar viewers.yaml con tus escape hatches. Ejemplo:
 ```
 
 ```yaml
-# viewers.yaml — contenido de ejemplo
+# viewers.yaml — contenido de ejemplo (solo escape hatches; las personas
+# reales como marilene_rousseau se resuelven via People table, no hace falta
+# listarlas acá).
 viewers:
-  - id: alice
-    regions:
-      - Caribbean
-      - Central America
-    allows_full_access: false
-  - id: bob
-    regions:
-      - Central US
-    allows_full_access: false
-  - id: dev
+  - id: admin_dev
     regions: []
-    allows_full_access: true  # Solo efectivo si ENV in {local, dev, test}
+    allows_full_access: true   # Solo efectivo si ENV in {local, dev, test}
+  - id: ci_account
+    regions: []
+    allows_full_access: false  # Sin acceso a ninguna región (CI smoke test)
 ```
 
-**Expected**: el archivo `viewers.yaml` existe en el root del proyecto.
+**Expected**: si creaste el archivo, `viewers.yaml` existe en el root del proyecto.
+Si no lo creaste, el CLI solo funcionará con `--viewer <persona_real>` o
+`--allow-full-access` (en local/dev).
 
 ### 3. Generar el Semantic Layer artifact
 
@@ -111,36 +115,50 @@ Provide --viewer <id> or, in local/dev, --allow-full-access.
 
 NO se ejecuta ninguna query. No hay bypass silencioso.
 
-### A2. `ask` con viewer scopea por región
+### A2. `ask` con viewer scopea por región (login como persona real)
+
+El CLI resuelve el viewer en la tabla `People` (login-as-person). Podés pasar
+cualquiera de las 24 personas del dataset, con cualquier forma del nombre:
 
 ```bash
-uv run python -m src.cli.main ask --viewer alice "What is the total sales amount?"
+# snake_case normalized ID
+uv run python -m src.cli.main ask --viewer marilene_rousseau "What is the total sales amount?"
+
+# O nombre completo con acentos
+uv run python -m src.cli.main ask --viewer "Marilène Rousseau" "What is the total sales amount?"
 ```
 
 **Expected** (spec FR-019 / SC-002):
-- El SQL ejecutado incluye `WHERE "Region" IN ('Caribbean', 'Central America')` (en el wrapper externo).
-- El resultado refleja la suma de `Sales` solo para esas regiones.
+- El CLI prints `Logged in as person 'marilene_rousseau': region=['Caribbean'] (resolved from People table)`.
+- El SQL ejecutado incluye `WHERE "Region" IN ('Caribbean')` (inyectado en el
+  WHERE del SQL del LLM — ver research.md Part A para el approach de predicate injection).
+- El resultado refleja la suma de `Sales` solo para esa región.
 - Verificar manualmente contra PG:
   ```sql
-  SELECT SUM("Sales") FROM Orders WHERE "Region" IN ('Caribbean', 'Central America');
+  SELECT SUM("Sales") FROM Orders WHERE "Region" IN ('Caribbean');
   ```
 
 ### A3. Dos viewers devuelven resultados distintos
 
 ```bash
-# Alice — regions [Caribbean, Central America]
-uv run python -m src.cli.main ask --viewer alice "What is the total sales amount?" 2>&1 | tail -5
+# Marilène Rousseau — region [Caribbean]
+uv run python -m src.cli.main ask --viewer marilene_rousseau "What is the total sales amount?" 2>&1 | tail -5
 
-# Bob — regions [Central US]
-uv run python -m src.cli.main ask --viewer bob "What is the total sales amount?" 2>&1 | tail -5
+# Lon Bonher — region [Central US]
+uv run python -m src.cli.main ask --viewer lon_bonher "What is the total sales amount?" 2>&1 | tail -5
 ```
 
-**Expected** (spec SC-002 / SC-003): los totales son distintos y coinciden con `SELECT SUM(Sales) WHERE Region IN (...)` directo. Si fueran iguales → hay un bypass y falla la garantía constitucional.
+**Expected** (spec SC-002 / SC-003): los totales son distintos (e.g., Caribbean ≈ 324k, Central US ≈ 501k)
+y coinciden con `SELECT SUM(Sales) WHERE Region IN (...)` directo. Si fueran
+iguales → hay un bypass y falla la garantía constitucional.
 
-### A4. Viewer con `regions: []` devuelve 0 filas
+### A4. Viewer con `regions: []` devuelve 0 filas (vía YAML fallback)
+
+Este caso requiere el fallback de YAML (no hay una persona real con regiones
+vacías en People). Agrega un viewer custom en `viewers.yaml`:
 
 ```yaml
-# En viewers.yaml:
+# En viewers.yaml (escape hatch local):
   - id: nobody
     regions: []
     allows_full_access: false
