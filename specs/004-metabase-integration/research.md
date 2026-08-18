@@ -59,9 +59,9 @@ def test_httpx_confined_to_metabase_client():
 
 ## Part B — Metabase Image Version Pinning
 
-### Decision: Pin del major+minor de Metabase; `latest` no permitido
+### Decision: Pin del LTS de Metabase; `latest` no permitido
 
-**Decision**: Usar el tag `metabase/metabase:v0.48-latest` en `docker-compose.yml` (pin the major+minor, allow patch updates). Cuando Metabase rompe API (e.g., un endpoint renombrado), la feature reporta error claro: el usuario debe bumpar el pin explícitamente y revisit la feature.
+**Decision**: Usar el tag `metabase/metabase:v0.58-lts` en `docker-compose.yml`. Metabase provee tags LTS (Long Term Support) que son los más estables para integración.
 
 **Rationale**:
 

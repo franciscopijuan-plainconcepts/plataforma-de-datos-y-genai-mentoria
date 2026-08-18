@@ -11,7 +11,7 @@ Reference: specs/004-metabase-integration/research.md Part C
 
 from __future__ import annotations
 
-from psycopg.sql import Identifier, SQL
+from psycopg.sql import Identifier, SQL, Literal
 
 from src.data_access.adapters.postgres.connection import DictConnection
 
@@ -41,11 +41,13 @@ def ensure_metabase_readonly_role(conn: DictConnection, password: str) -> None:
             (_ROLE_NAME,),
         )
         if cur.fetchone() is None:
-            # CREATE ROLE — note the SQL identifier composition (psycopg.sql)
-            # for the role name and the literal password bound via %s.
+            # CREATE ROLE — DDL cannot use server-side bind parameters for
+            # PASSWORD (same psycopg quirk as baseline's _render_column_ddl).
+            # Use psycopg.sql.Literal to safely compose the password literal.
             cur.execute(
-                SQL("CREATE ROLE {} LOGIN PASSWORD %s").format(Identifier(_ROLE_NAME)),
-                (password,),
+                SQL("CREATE ROLE {} LOGIN PASSWORD {}").format(
+                    Identifier(_ROLE_NAME), Literal(password)
+                )
             )
             _created = True
         else:

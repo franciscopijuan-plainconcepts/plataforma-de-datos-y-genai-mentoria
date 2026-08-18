@@ -38,7 +38,7 @@ services:
   # Pinned to a major+minor tag (research.md Part B) for API stability.
   # ---------------------------------------------------------------------------
   metabase:
-    image: metabase/metabase:v0.48-latest
+    image: metabase/metabase:v0.58-lts
     container_name: plataforma_metabase
     restart: unless-stopped
     depends_on:
