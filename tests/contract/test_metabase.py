@@ -107,7 +107,10 @@ def test_card_requires_non_empty_sql() -> None:
 def test_card_display_closed_set() -> None:
     """The Literal CardDisplay closes the legal values; arbitrary display string is rejected."""
     with pytest.raises(ValidationError):
-        Card(id=1, name="X", sql="SELECT 1", collection_id=1, display="invalid")  # type: ignore[arg-type]
+        # Intentionally passing an invalid display value; the bare type:ignore
+        # silences mypy on the literal mismatch (no specific code — the error
+        # rule differs between mypy versions).
+        Card(id=1, name="X", sql="SELECT 1", collection_id=1, display="invalid")  # type: ignore
 
 
 def test_card_name_max_140_chars() -> None:
@@ -121,7 +124,7 @@ def test_card_is_immutable() -> None:
     """Frozen models cannot be reassigned post-construction (constitution Principle I)."""
     card = Card(id=1, name="X", sql="SELECT 1", collection_id=1, display="table")
     with pytest.raises(ValidationError):
-        card.sql = "SELECT 2"  # type: ignore[misc]
+        card.sql = "SELECT 2"
 
 
 # --- MetabaseSession model -------------------------------------------------

@@ -24,7 +24,7 @@ import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from dotenv import load_dotenv
 
@@ -41,6 +41,12 @@ from src.data_engineering.ingestion.manifest import (
     sha256_of_file,
     write_manifest,
 )
+
+if TYPE_CHECKING:
+    # Avoid top-level import cycle: MetabaseSession is used only in type hints
+    # of private helpers that are invoked after the runtime import inside the
+    # commands (e.g., `from src.contracts.metabase import MetabaseSession`).
+    from src.contracts.metabase import MetabaseSession
 
 # --- Repository root + file paths ---
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -621,6 +627,165 @@ def cmd_generate_semantic_layer() -> None:
     print(f"  JSON deterministic: True (no generated_at field in JSON)")
 
 
+# ---------------------------------------------------------------------------
+# v2.1 Metabase integration (feature 004)
+# ---------------------------------------------------------------------------
+
+_METABASE_STATE_PATH = _REPO_ROOT / ".artifacts" / "metabase_state.json"
+
+
+def _wait_for_metabase_health(timeout_s: int = 120) -> bool:
+    """Poll `GET /api/health` until 200 OK or timeout. Returns True on ready."""
+    import urllib.request
+
+    deadline = time.time() + timeout_s
+    url = f"{os.environ.get('METABASE_HOST', 'http://localhost:3000')}/api/health"
+    while time.time() < deadline:
+        try:
+            with urllib.request.urlopen(url, timeout=5) as _:
+                return True
+        except Exception:
+            time.sleep(2)
+    return False
+
+
+def _compose_metabase(action_args: list[str]) -> None:
+    """Run `docker compose -f <compose> <action_args...> metabase`.
+
+    The action args are a separate list so that "up -d" is passed as two args
+    (["up", "-d"]) rather than a single concatenated token.
+    """
+    cmd = ["docker", "compose", "-f", str(_COMPOSE_FILE), *action_args, "metabase"]
+    subprocess.run(cmd, check=True)
+
+
+def _save_metabase_state(state: MetabaseSession) -> None:
+    """Persist the MetabaseSession to .artifacts/metabase_state.json."""
+    _METABASE_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    _METABASE_STATE_PATH.write_text(
+        state.model_dump_json(indent=2), encoding="utf-8"
+    )
+
+
+def _load_metabase_state() -> MetabaseSession | None:
+    """Load the persisted MetabaseSession, or None if not yet set up."""
+    if not _METABASE_STATE_PATH.exists():
+        return None
+    from src.contracts.metabase import MetabaseSession
+
+    try:
+        return MetabaseSession.model_validate_json(
+            _METABASE_STATE_PATH.read_text(encoding="utf-8")
+        )
+    except Exception:
+        return None
+
+
+def cmd_metabase_setup() -> None:
+    """metabase setup: bring up the Metabase container + automate the initial setup.
+
+    Idempotent: if Metabase is already configured (setup-token is null),
+    skips admin user creation. Persists state to .artifacts/metabase_state.json
+    for use by subsequent commands.
+
+    Requires Docker, the warehouse (PostgreSQL) running, and METABASE_*
+    env vars.
+    """
+    from src.ai_engineering.metabase_client import MetabaseClient
+    from src.contracts.metabase import MetabaseConfig, MetabaseSession
+    from src.data_access.adapters.postgres.roles import (
+        ensure_metabase_readonly_role,
+    )
+
+    if not _docker_available():
+        _err("Docker is not running. Run `bootstrap` first to start the warehouse.")
+
+    # 1. Bring up the Metabase container.
+    _info("Starting Metabase container (this may take a minute on first pull)...")
+    try:
+        _compose_metabase(["up", "-d"])
+    except subprocess.CalledProcessError as exc:
+        _err(
+            f"docker compose up failed for metabase: "
+            f"{exc.stderr if exc.stderr else exc}"
+        )
+
+    # 2. Wait for healthcheck.
+    _info("Waiting for Metabase healthcheck...")
+    if not _wait_for_metabase_health():
+        _err("Metabase did not become healthy within the timeout.")
+
+    # 3. Load config (env vars).
+    try:
+        mb_config = MetabaseConfig.from_env()
+    except ValueError as exc:
+        _err(str(exc))
+
+    client = MetabaseClient(mb_config)
+
+    # 4. Create the metabase_readonly PG role (defense-in-depth; Principle IV).
+    _info("Ensuring metabase_readonly PG role with SELECT grants...")
+    config = PostgresConfig.from_env()
+    try:
+        with PostgresRepository(config=config) as repo:
+            ensure_metabase_readonly_role(
+                repo._conn, mb_config.admin_password
+            )
+    except Exception as exc:
+        _err(f"Failed to create metabase_readonly role: {exc}")
+
+    # 5. Auto-setup admin user (idempotent via is_setup_complete check).
+    _info("Checking Metabase setup status...")
+    if client.is_setup_complete():
+        _info("  Metabase already configured (admin user present); skipping setup_initial().")
+    else:
+        _info("  Running setup_initial() to create the admin user...")
+        client.setup_initial(mb_config.admin_email, mb_config.admin_password)
+
+    # 6. Create the database connection to PostgreSQL (metabase_readonly role).
+    _info("Creating Metabase → PostgreSQL database connection...")
+    db_id = client.create_db_connection(
+        pg_host=os.environ.get("POSTGRES_HOST", "localhost"),
+        pg_port=int(os.environ.get("POSTGRES_PORT", "5432")),
+        pg_database=os.environ.get("POSTGRES_DB", "global_superstore"),
+        pg_user="metabase_readonly",
+        pg_password=mb_config.admin_password,  # reuse local-only password
+        db_name=mb_config.db_name,
+    )
+    if db_id is None:
+        _err("Failed to create Metabase database connection.")
+
+    # 7. Create the "Chat Sessions" collection.
+    _info('Creating Metabase "Chat Sessions" collection...')
+    collection = client.get_or_create_collection(mb_config.collection_name)
+    if collection is None:
+        _err('Failed to create Metabase collection "Chat Sessions".')
+
+    # 8. Persist state.
+    version = client.get_version()
+    state = MetabaseSession(
+        configured_at=datetime.now(timezone.utc),
+        admin_email=mb_config.admin_email,
+        metabase_db_id=db_id or 0,
+        collection_id=collection.id if collection else 0,
+        metabase_version=version,
+    )
+    _save_metabase_state(state)
+
+    # 9. Print summary.
+    _info("Metabase setup complete.")
+    print("")
+    print("Metabase summary")
+    print(f"  URL              : {mb_config.host}")
+    print(f"  Admin email      : {mb_config.admin_email}")
+    print(f"  Metabase version : {version}")
+    print(f"  DB connection id : {state.metabase_db_id} (PostgreSQL via metabase_readonly)")
+    print(f"  Collection id    : {state.collection_id} ({mb_config.collection_name!r})")
+    print(f"  State persisted  : {_METABASE_STATE_PATH}")
+    print("")
+    print(f"Open {mb_config.host} and login with the admin credentials.")
+
+
 def cmd_evaluate() -> None:
     """evaluate: run the sanity-check evaluation (v1.1).
 
@@ -692,6 +857,7 @@ _COMMANDS = {
     "validate": cmd_validate,
     "generate-dictionary": None,  # has special arg handling in main()
     "generate-semantic-layer": None,  # v2.0 — has special arg handling in main()
+    "metabase": None,  # v2.1 — subcommands dispatched in main()
     "ask": None,  # has special arg handling in main()
     "evaluate": None,  # has special arg handling in main()
 }
@@ -708,6 +874,7 @@ def main(argv: list[str] | None = None) -> None:
         print("  validate                          Single pass/fail health check")
         print("  generate-dictionary [--source P]  Generate data_dictionary.md from the schema")
         print("  generate-semantic-layer            Generate .artifacts/semantic_layer.{json,md}")
+        print("  metabase <setup|...>                v2.1 Metabase integration (`metabase setup` to bootstrap)")
         print("  ask <question> [--viewer <id>]     Translate a natural-language question to SQL")
         print("                                      (--viewer <id> resolves a person from the")
         print("                                       People table, or a custom viewer from")
@@ -726,6 +893,25 @@ def main(argv: list[str] | None = None) -> None:
         return
     if command == "generate-semantic-layer":
         cmd_generate_semantic_layer()
+        return
+    if command == "metabase":
+        # Subcommands: setup | status | teardown | reset-cards.
+        # T011 US1: metabase setup. T029-T031 US4: the others.
+        if not rest:
+            _err("Usage: python -m src.cli.main metabase <setup|status|teardown|reset-cards>")
+        sub = rest[0]
+        sub_rest = rest[1:]
+        # T011 / T012-T014 (US1)
+        if sub == "setup":
+            cmd_metabase_setup()
+            return
+        # The rest are implemented in Phase 6 (US4); fail-fast until then.
+        if sub in {"status", "teardown", "reset-cards"}:
+            _err(
+                f"metabase {sub} not yet implemented (Phase 6 / US4). "
+                f"For setup, run: metabase setup"
+            )
+        _err(f"Unknown metabase subcommand: {sub!r}. Use setup|status|teardown|reset-cards.")
         return
     if command == "ask":
         # Parse v2.0 flags: --viewer <id> and --allow-full-access.

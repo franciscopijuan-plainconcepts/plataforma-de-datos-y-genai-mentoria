@@ -290,8 +290,11 @@ def test_display_scalar_for_single_value() -> None:
 
 
 def test_display_bar_for_group_by_with_few_rows() -> None:
+    from typing import cast
+
+    rows = cast(list[dict[str, object]], [{"region": "Caribbean"}, {"region": "Central US"}])
     response = _build_response(
-        [{"region": "Caribbean"}, {"region": "Central US"}],
+        rows,
         'SELECT "Region" FROM Orders GROUP BY "Region"',
     )
     assert MetabaseClient._infer_display_type(response) == "bar"
@@ -299,7 +302,9 @@ def test_display_bar_for_group_by_with_few_rows() -> None:
 
 def test_display_table_when_more_than_20_rows() -> None:
     """Even with GROUP BY, more than 20 rows falls back to table display."""
-    rows = [{"region": f"R{i}"} for i in range(25)]
+    from typing import cast
+
+    rows = cast(list[dict[str, object]], [{"region": f"R{i}"} for i in range(25)])
     response = _build_response(rows, 'SELECT "Region" FROM Orders GROUP BY "Region"')
     assert MetabaseClient._infer_display_type(response) == "table"
 

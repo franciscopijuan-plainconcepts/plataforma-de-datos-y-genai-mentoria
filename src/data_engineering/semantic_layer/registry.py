@@ -23,7 +23,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-import yaml  # pyyaml — confined to this module (boundary test enforced)
+import yaml  # type: ignore[import-untyped]  # pyyaml ships no PEP-561 stubs; mypy override below covers it too.
 
 from src.contracts.semantic_layer import SemanticViewer
 
