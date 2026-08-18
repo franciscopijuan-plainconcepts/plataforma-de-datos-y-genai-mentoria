@@ -4,9 +4,9 @@ Documento vivo para seguimiento del estado actual, decisiones clave, riesgos y s
 
 ## Estado actual (snapshot)
 
-- Fecha de actualizacion: 2026-08-17
-- Branch principal: main (feature en `003-semantic-layer-v1`)
-- Estado global: v2.0 Semantic Layer + Governance implementado y validado
+- Fecha de actualizacion: 2026-08-18
+- Branch principal: main (feature en `004-metabase-integration`)
+- Estado global: v2.1 Metabase integration implementado y validado
 - Ambito completado:
   - Warehouse local PostgreSQL en Docker (v0 baseline)
   - Ingestion desde Global Superstore Data.xlsx (v0)
@@ -125,6 +125,8 @@ La siguiente fase requiere definiciones de negocio mas estrictas para evitar SQL
 | M1 | v1.0 Text-to-SQL sobre Orders | Completado | - | 2026-08-11 | Pipeline NL→SQL→resultados tipados |
 | M2 | v1.1 Hardening + Evaluation | Completado | - | 2026-08-11 | Logging + sanity-check (~10 preguntas) |
 | M3 | v2.0 Semantic Layer + RLS Governance | Completado | - | 2026-08-17 | SemanticLayerDocument + GovernedQueryProvider (RLS enforced, Principle IV satisfied) |
+| M3.1 | v2.1 Metabase Integration | Completado | - | 2026-08-18 | Metabase + governed SQL cards + sessions + CLI ops |
+| M3.1 | v2.1 Metabase Integration | Completado | - | 2026-08-18 | Metabase + governed SQL cards + sessions + CLI ops |
 | M4 | v3.0 RBAC column-level + People.Region taxonomy + Audit | Pendiente | TBD | TBD | Resolución de mismatch Canada; auth real; audit persistente |
 
 ## Rutina de mantenimiento de este documento

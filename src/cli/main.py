@@ -333,6 +333,8 @@ def cmd_ask(
     question: str,
     viewer_id: str | None = None,
     allow_full_access: bool = False,
+    metabase_enabled: bool = True,
+    session_id: str | None = None,
 ) -> None:
     """ask: translate a natural-language question to SQL and return results.
 
@@ -348,6 +350,16 @@ def cmd_ask(
         RLS is enforced on every executed query.
       - When the Semantic Layer artifact exists at `.artifacts/semantic_layer.json`,
         loads it and passes it to the pipeline so the prompt includes metrics.
+
+    v2.1 (feature 004-metabase-integration):
+      - When `metabase_enabled=True` and Metabase is reachable, wires a
+        `on_query_complete` callback that calls MetabaseClient.send_governed_query
+        to create a card in the 'Chat Sessions' collection with the ALREADY-
+        GOVERNED SQL (Principle IV preserved by design). Best-effort: failures
+        are logged as warnings and do NOT break the pipeline (FR-013).
+      - `--no-metabase` flag disables this integration (SC-006).
+      - `--session <id>` routes the generated card into a 'Session: <id>'
+        dashboard within the 'Chat Sessions' collection (US3).
     """
     from src.ai_engineering.llm_client import LlmClient
     from src.ai_engineering.pipeline import TextToSqlPipeline
@@ -513,6 +525,43 @@ def cmd_ask(
 
     llm_client = LlmClient(llm_config)
 
+    # --- v2.1: optional MetabaseClient (best-effort integration) ---
+    metabase_client = None
+    if metabase_enabled:
+        try:
+            from src.ai_engineering.metabase_client import MetabaseClient
+            from src.contracts.metabase import MetabaseConfig
+
+            mb_config = MetabaseConfig.from_env()
+            metabase_client = MetabaseClient(mb_config)
+            # Verify Metabase is reachable (best-effort probe).
+            metabase_client.get_health()
+        except Exception as exc:
+            _info(
+                f"Metabase integration disabled (best-effort): {exc}"
+            )
+            metabase_client = None
+
+    # Build the on_query_complete callback (or None if Metabase is disabled).
+    metabase_state = _load_metabase_state() if metabase_client is not None else None
+    collection_id = metabase_state.collection_id if metabase_state is not None else None
+
+    def on_query_complete(response: object, viewer_arg: object) -> None:
+        # The callback is invoked by the pipeline at the end of a successful run.
+        # Best-effort: never raises (errors are logged inside send_governed_query).
+        if metabase_client is None:
+            return
+        # Cast viewer to its real type for the type checker.
+        v = viewer_arg if isinstance(viewer_arg, SemanticViewer) else None
+        card = metabase_client.send_governed_query(
+            response=response,  # type: ignore[arg-type]
+            viewer=v,
+            session_id=session_id,
+            collection_id=collection_id,
+        )
+        if card is not None:
+            _info(f"Metabase card created: id={card.id} name={card.name!r}")
+
     # --- Run the pipeline with a GovernedQueryProvider (RLS enforced) ---
     with PostgresRepository(config=config) as repo:
         query_provider = build_governed_provider(
@@ -529,6 +578,7 @@ def cmd_ask(
             llm_config=llm_config,
             semantic_layer=semantic_doc,
             viewer=viewer,
+            on_query_complete=on_query_complete,
         )
         response = pipeline.run(NLQuestion(text=question))
 
@@ -786,6 +836,86 @@ def cmd_metabase_setup() -> None:
     print(f"Open {mb_config.host} and login with the admin credentials.")
 
 
+def cmd_metabase_status() -> None:
+    """metabase status: print a readable summary of the Metabase instance."""
+    from src.ai_engineering.metabase_client import MetabaseClient
+    from src.contracts.metabase import MetabaseConfig
+
+    try:
+        mb_config = MetabaseConfig.from_env()
+    except ValueError as exc:
+        _err(str(exc))
+    client = MetabaseClient(mb_config)
+
+    health = client.get_health()
+    version = client.get_version()
+    state = _load_metabase_state()
+    cards_count: int = 0
+    if state is not None:
+        cards = client.list_cards_in_collection(state.collection_id)
+        cards_count = len(cards)
+
+    print("Metabase status")
+    print(f"  URL              : {mb_config.host}")
+    print(f"  Version          : {version}")
+    print(f"  Health           : {health}")
+    print(f"  Admin email      : {state.admin_email if state else 'not set up'}")
+    print(f"  DB connection id : {state.metabase_db_id if state else 'n/a'}")
+    print(f"  Collection id    : {state.collection_id if state else 'n/a'}")
+    print(f"  Cards in 'Chat Sessions': {cards_count}")
+
+
+def cmd_metabase_teardown(remove_volume: bool = False) -> None:
+    """metabase teardown: stop and remove the Metabase container (+ optional volume)."""
+    if not _docker_available():
+        _err("Docker is not running; nothing to tear down for Metabase.")
+
+    _info("Stopping Metabase container...")
+    try:
+        _compose_metabase(["stop"])
+        _compose_metabase(["rm", "-f"])
+    except subprocess.CalledProcessError as exc:
+        _err(f"Metabase teardown failed: {exc}")
+
+    if remove_volume:
+        result = subprocess.run(
+            ["docker", "volume", "rm", "plataforma_metabase_data"],
+            capture_output=True, text=True, check=False,
+        )
+        if result.returncode != 0:
+            _info(f"Note: could not remove volume (may already be gone): {result.stderr.strip()}")
+
+    _info("Metabase teardown complete. PG warehouse remains running.")
+
+
+def cmd_metabase_reset_cards() -> None:
+    """metabase reset-cards: delete every card in the 'Chat Sessions' collection."""
+    from src.ai_engineering.metabase_client import MetabaseClient
+    from src.contracts.metabase import MetabaseConfig
+
+    state = _load_metabase_state()
+    if state is None:
+        _err("Metabase state not found; run `metabase setup` first.")
+
+    try:
+        mb_config = MetabaseConfig.from_env()
+    except ValueError as exc:
+        _err(str(exc))
+    client = MetabaseClient(mb_config)
+
+    cards = client.list_cards_in_collection(state.collection_id)
+    if not cards:
+        _info("No cards to delete in 'Chat Sessions' collection.")
+        return
+
+    deleted = 0
+    for card in cards:
+        if client.delete_card(card.id):
+            deleted += 1
+
+    _info(f"Deleted {deleted}/{len(cards)} cards from 'Chat Sessions' (admin user + DB connection intact).")
+
+
 def cmd_evaluate() -> None:
     """evaluate: run the sanity-check evaluation (v1.1).
 
@@ -875,10 +1005,12 @@ def main(argv: list[str] | None = None) -> None:
         print("  generate-dictionary [--source P]  Generate data_dictionary.md from the schema")
         print("  generate-semantic-layer            Generate .artifacts/semantic_layer.{json,md}")
         print("  metabase <setup|...>                v2.1 Metabase integration (`metabase setup` to bootstrap)")
-        print("  ask <question> [--viewer <id>]     Translate a natural-language question to SQL")
+        print("  ask <question> [--viewer <id>] [--no-metabase] [--session <id>]")
+        print("                                      Translate a natural-language question to SQL")
         print("                                      (--viewer <id> resolves a person from the")
         print("                                       People table, or a custom viewer from")
-        print("                                       viewers.yaml)")
+        print("                                       viewers.yaml; --no-metabase skips Metabase;")
+        print("                                       --session <id> groups cards under a dashboard)")
         print("  evaluate                           Run sanity-check evaluation (v1.1)")
         sys.exit(0 if args else 1)
 
@@ -907,17 +1039,27 @@ def main(argv: list[str] | None = None) -> None:
             return
         # The rest are implemented in Phase 6 (US4); fail-fast until then.
         if sub in {"status", "teardown", "reset-cards"}:
-            _err(
-                f"metabase {sub} not yet implemented (Phase 6 / US4). "
-                f"For setup, run: metabase setup"
-            )
+            if sub == "status":
+                cmd_metabase_status()
+                return
+            if sub == "teardown":
+                remove_vol = "--remove-volume" in sub_rest
+                cmd_metabase_teardown(remove_volume=remove_vol)
+                return
+            if sub == "reset-cards":
+                cmd_metabase_reset_cards()
+                return
         _err(f"Unknown metabase subcommand: {sub!r}. Use setup|status|teardown|reset-cards.")
         return
+        return
     if command == "ask":
-        # Parse v2.0 flags: --viewer <id> and --allow-full-access.
+        # Parse v2.0/v2.1 flags: --viewer <id>, --allow-full-access,
+        # --no-metabase, --session <id>.
         # Any remaining non-flag token is part of the question (joined).
         viewer_id: str | None = None
         allow_full = False
+        metabase_enabled = True
+        session_id: str | None = None
         question_tokens: list[str] = []
         i = 0
         while i < len(rest):
@@ -930,12 +1072,26 @@ def main(argv: list[str] | None = None) -> None:
                 allow_full = True
                 i += 1
                 continue
+            if tok == "--no-metabase":
+                metabase_enabled = False
+                i += 1
+                continue
+            if tok == "--session" and i + 1 < len(rest):
+                session_id = rest[i + 1]
+                i += 2
+                continue
             question_tokens.append(tok)
             i += 1
         if not question_tokens:
-            _err("Usage: python -m src.cli.main ask <question> [--viewer <id>]")
+            _err("Usage: python -m src.cli.main ask <question> [--viewer <id>] [--no-metabase] [--session <id>]")
         question_text = " ".join(question_tokens)
-        cmd_ask(question_text, viewer_id=viewer_id, allow_full_access=allow_full)
+        cmd_ask(
+            question_text,
+            viewer_id=viewer_id,
+            allow_full_access=allow_full,
+            metabase_enabled=metabase_enabled,
+            session_id=session_id,
+        )
         return
     if command == "evaluate":
         cmd_evaluate()
