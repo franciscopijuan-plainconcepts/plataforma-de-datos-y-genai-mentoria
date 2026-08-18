@@ -269,3 +269,81 @@ def test_no_ai_engineering_direct_adapter_import() -> None:
         "ai_engineering bypasses the QueryProvider Protocol by importing the "
         f"adapter directly — constitution Principle IV violation: {offenders}."
     )
+
+
+# ---------------------------------------------------------------------------
+# Boundary 7 (v2.1 / feature 004): Metabase-specific confinement rules.
+# ---------------------------------------------------------------------------
+
+def test_metabase_client_not_imported_by_pipeline() -> None:
+    """`src/ai_engineering/pipeline.py` MUST NOT import `metabase_client`.
+
+    Constitution Principle II/III: the TextToSqlPipeline receives a generic
+    `on_query_complete` callback via constructor injection and must remain
+    agnostic of any concrete sink (Metabase or otherwise). Importing
+    `metabase_client` directly would couple the AI Engineering core to the
+    Metabase HTTP layer and break the boundary tested in T008.
+    """
+    ai_engineering_root = _REPO_ROOT / "src" / "ai_engineering"
+    forbidden_in_pipeline_only = {"src.ai_engineering.metabase_client", "metabase_client"}
+    offenders: list[str] = []
+    pipeline_path = ai_engineering_root / "pipeline.py"
+    if not pipeline_path.exists():
+        pytest.skip("src/ai_engineering/pipeline.py not found (unexpected).")
+    try:
+        tree = ast.parse(pipeline_path.read_text(encoding="utf-8"))
+    except SyntaxError:
+        pytest.skip("Could not parse src/ai_engineering/pipeline.py.")
+    referenced_modules: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            if node.module is not None:
+                referenced_modules.add(node.module)
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                referenced_modules.add(alias.name)
+    for forbidden in forbidden_in_pipeline_only:
+        if forbidden in referenced_modules:
+            offenders.append(
+                f"src/ai_engineering/pipeline.py imports {forbidden!r}"
+            )
+    assert not offenders, (
+        "Principle II/III violation: TextToSqlPipeline coupled to Metabase "
+        f"directly: {offenders}. The MetabaseClient MUST be injected via the "
+        "`on_query_complete` callback (composition root lives in cli/main.py)."
+    )
+
+
+def test_metabase_client_only_imported_outside_ai_engineering_from_cli() -> None:
+    """`metabase_client` may be referenced only from `src/cli/main.py` (composition root)
+    and the test files. NOT from data_engineering, data_access, or contracts.
+
+    Constitution Principle II: the Metabase sink lives in AI Engineering; no
+    sibling domain should import it.
+    """
+    src_root = _REPO_ROOT / "src"
+    offenders: list[str] = []
+    for py_file in _iter_python_files(src_root):
+        # Skip ai_engineering (where metabase_client lives) — self-imports are
+        # only the metabase_client.py itself and the tests.
+        if _is_under(py_file, {_REPO_ROOT / "src" / "ai_engineering"}):
+            continue
+        # Skip cli/ — it's the composition root.
+        if _is_under(py_file, {_REPO_ROOT / "src" / "cli"}):
+            continue
+        # Skip contracts/ — pure type defs, no runtime imports.
+        if _is_under(py_file, {_REPO_ROOT / "src" / "contracts"}):
+            continue
+        # For each remaining file, check for `metabase_client` import.
+        try:
+            tree = ast.parse(py_file.read_text(encoding="utf-8"))
+        except SyntaxError:
+            continue
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and node.module and "metabase_client" in node.module:
+                offenders.append(str(py_file.relative_to(_REPO_ROOT)))
+                break
+    assert not offenders, (
+        "`metabase_client` imported outside CLI composition root / "
+        f"ai_engineering: {offenders}."
+    )
