@@ -133,6 +133,11 @@ class MetabaseClient:
 
         `GET /api/session/properties` is public; if `setup-token` is null,
         the admin user was already created.
+
+        Additional check (v0.58 compatibility): if setup-token is non-null
+        but we CAN log in with the admin creds, the setup was actually
+        completed (some versions don't clear the token immediately) —
+        treat that as setup complete too.
         """
         try:
             response = self._client.get("/api/session/properties")
@@ -141,7 +146,18 @@ class MetabaseClient:
             _logger.warning("Metabase session/properties check failed: %s", exc)
             return False
         props = response.json()
-        return not props.get("setup-token")
+        if not props.get("setup-token"):
+            return True
+        # setup-token is non-null, but maybe setup was done via the wizard
+        # and the token wasn't cleared. Try to login — if it works, we're
+        # already set up.
+        try:
+            self._session_token = None
+            self.login()
+            return True
+        except httpx.HTTPError:
+            # Login failed — setup is genuinely not complete.
+            return False
 
     def get_version(self) -> str:
         """Return the Metabase version reported by the server."""
@@ -308,10 +324,12 @@ class MetabaseClient:
         collection_id: int,
         display: str,
         description: str | None = None,
+        db_id: int = 1,
     ) -> Card | None:
         """POST /api/card to create a Metabase native-query card.
 
         The `sql` parameter MUST be the already-governed SQL (post-RLS injection).
+        The `db_id` is the Metabase database connection ID (from MetabaseSession).
         """
         # Metabase truncates card names; pre-truncate to avoid 4xx.
         truncated_name = name[:_MAX_CARD_NAME_LEN]
@@ -320,10 +338,10 @@ class MetabaseClient:
             "dataset_query": {
                 "type": "native",
                 "native": {"query": sql},
-                "database": 1,  # placeholder; overridden by the db_id below
+                "database": db_id,
             },
             "display": display,
-            "visualization_options": {},
+            "visualization_settings": {},
             "collection_id": collection_id,
         }
         # description is optional but useful for governance traceability.
@@ -475,6 +493,7 @@ class MetabaseClient:
         viewer: SemanticViewer | None,
         session_id: str | None = None,
         collection_id: int | None = None,
+        db_id: int = 1,
     ) -> Card | None:
         """Create a Metabase card from an `ask` response (best-effort, never raises).
 
@@ -487,6 +506,8 @@ class MetabaseClient:
                 <id>" dashboard inside the collection.
             collection_id: optional; if None, returns None (the caller must
                 supply the state's collection_id from MetabaseSession).
+            db_id: the Metabase database connection ID (from MetabaseSession).
+                Default 1 is a safe fallback for single-DB instances.
 
         Returns:
             `Card` on success, `None` on any failure (logged as warning).
@@ -525,6 +546,7 @@ class MetabaseClient:
             collection_id=collection_id,
             display=display,
             description=description,
+            db_id=db_id,
         )
         if card is None:
             return None

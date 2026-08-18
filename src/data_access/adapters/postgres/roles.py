@@ -49,9 +49,14 @@ def ensure_metabase_readonly_role(conn: DictConnection, password: str) -> None:
                     Identifier(_ROLE_NAME), Literal(password)
                 )
             )
-            _created = True
         else:
-            _created = False
+            # Role exists — update the password (idempotency: the password
+            # might have changed since the last run).
+            cur.execute(
+                SQL("ALTER ROLE {} WITH LOGIN PASSWORD {}").format(
+                    Identifier(_ROLE_NAME), Literal(password)
+                )
+            )
 
         # Always (re)grant SELECT on existing tables in `public` to be safe.
         cur.execute(

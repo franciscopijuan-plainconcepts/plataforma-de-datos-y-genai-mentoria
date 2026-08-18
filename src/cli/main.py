@@ -545,6 +545,7 @@ def cmd_ask(
     # Build the on_query_complete callback (or None if Metabase is disabled).
     metabase_state = _load_metabase_state() if metabase_client is not None else None
     collection_id = metabase_state.collection_id if metabase_state is not None else None
+    db_id = metabase_state.metabase_db_id if metabase_state is not None else 1
 
     def on_query_complete(response: object, viewer_arg: object) -> None:
         # The callback is invoked by the pipeline at the end of a successful run.
@@ -558,6 +559,7 @@ def cmd_ask(
             viewer=v,
             session_id=session_id,
             collection_id=collection_id,
+            db_id=db_id,
         )
         if card is not None:
             _info(f"Metabase card created: id={card.id} name={card.name!r}")
