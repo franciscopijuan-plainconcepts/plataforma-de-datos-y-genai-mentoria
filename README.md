@@ -119,18 +119,19 @@ METABASE_ADMIN_PASSWORD=Metabase2026!
 > Metabase v0.58 rejects simple passwords like `metabase_dev_local`. Use a
 > password with uppercase, lowercase, numbers, and special characters.
 
-### Step 3: Bring up the PostgreSQL warehouse
+### Step 3: Bring up the PostgreSQL warehouse + Metabase container
 
 ```bash
 uv run python -m src.cli.main bootstrap
 ```
 
 **What this does**:
-- Starts PostgreSQL in Docker (via `docker-compose.yml`).
+- Starts PostgreSQL AND Metabase in Docker (via `docker-compose.yml`).
 - Runs EDA on `Global Superstore Data.xlsx` (infers schema, types).
 - Creates the `Orders`, `Returns`, `People` tables.
 - Loads all data into the warehouse.
 - Writes `.artifacts/load_manifest.json` with provenance (source hash).
+- The Metabase container also starts (but is not configured yet — see Step 7).
 
 **Expected output**: ends with `Bootstrap complete. Run 'validate' to confirm.`
 
@@ -147,8 +148,7 @@ uv run python -m src.cli.main validate
 ```
 
 **Expected output**: `VALIDATION PASSED` — confirms:
-- Docker container is up.
-- DB is reachable.
+- Docker container is up, DB is reachable.
 - All three tables present with expected row counts.
 - Load manifest present with matching source hash.
 - Data dictionary file present.
@@ -174,31 +174,83 @@ deterministic JSON) and `.artifacts/semantic_layer.md` (human-readable) —
 declaring 8 business metrics (gross_sales, net_sales, return_rate, etc.),
 11 dimensions, and 2 cross-table relationships.
 
-### Step 7: (Optional) Set up Metabase
+### Step 7: Wait for Metabase to become healthy
 
 ```bash
-uv run python -m src.cli.main metabase setup
+sleep 45
 ```
 
-**What this does**:
-- Starts the Metabase container in Docker (alongside PostgreSQL).
-- Waits for the healthcheck to pass.
-- Creates the `metabase_readonly` PG role (SELECT-only, defense-in-depth).
-- Bootstraps the Metabase admin user via `POST /api/setup` (idempotent —
-  skips if already configured).
-- Connects Metabase to your PostgreSQL warehouse (using `metabase_readonly`).
-- Creates the "Chat Sessions" collection in Metabase.
-- Persists the setup state to `.artifacts/metabase_state.json`.
+The Metabase container was started in Step 3, but it needs ~30-45 seconds to
+initialise its internal H2 database before the API is ready. This wait ensures
+the `/api/health` endpoint responds with `{"status":"ok"}`.
 
-**Expected output**: a summary block with URL, admin email, version, DB
-connection ID, and collection ID. Then open `http://localhost:3000` and
-login with the admin credentials from your `.env`.
+**Verify Metabase is ready**:
 
-> **Note**: This step is **optional** — the `ask` command works without
-> Metabase (it just skips the card creation with a warning). But if you want
-> the visualization layer, this step is required.
+```bash
+curl -s http://localhost:3000/api/health
+# Expected: {"status":"ok"}
+```
 
-### Step 8: (Optional) Copy `viewers.yaml` for escape hatches
+### Step 8: Bootstrap Metabase (admin user + DB connection + collection + PG role)
+
+```bash
+uv run python scripts/metabase_bootstrap.py
+```
+
+**What this does** (all automated — no manual UI wizard needed):
+
+1. **Checks Metabase health** (`GET /api/health`).
+2. **Creates the `metabase_readonly` PG role** in PostgreSQL with the correct
+   password (from `METABASE_ADMIN_PASSWORD`) + `GRANT SELECT` on all tables +
+   `ALTER DEFAULT PRIVILEGES` for future tables (defense-in-depth, Principle IV).
+3. **Fetches the setup token** from `GET /api/session/properties`.
+4. **Creates the admin user** via `POST /api/setup` (or skips if already done).
+5. **Logs in** with the admin credentials → session token.
+6. **Creates the PostgreSQL DB connection** in Metabase (using the
+   `metabase_readonly` role — read-only, defense-in-depth).
+7. **Creates the "Chat Sessions" collection** where pipeline-generated cards live.
+8. **Persists the state** to `.artifacts/metabase_state.json` (idempotency cache
+   for subsequent `metabase setup` / `metabase status` / `metabase cards` commands).
+
+> **Note**: This script is idempotent — you can run it multiple times safely.
+> If the admin user, DB connection, or collection already exist, it detects them
+> and skips re-creation.
+
+**Expected output**:
+
+```
+============================================================
+Metabase Bootstrap (v0.58 LTS API compatibility)
+============================================================
+Step 0: Checking Metabase health...
+  [OK] Metabase is healthy.
+Step 7: Ensuring metabase_readonly PG role...
+  [OK] Role metabase_readonly created.
+  [OK] SELECT grants applied.
+Step 1: Fetching setup-token...
+  [OK] setup-token: 76ab6a7e-32c6-49e2-b...
+Step 2: Creating admin user...
+  [OK] Admin user created.
+Step 3: Logging in...
+  [OK] session: 5b8ba1ba-c221-4365-9...
+Step 4: Creating DB connection...
+  [OK] DB connection created (id=2).
+Step 5: Creating 'Chat Sessions' collection...
+  [OK] Collection created (id=5).
+Step 6: Persisting state...
+  [OK] State persisted to .artifacts/metabase_state.json.
+
+============================================================
+Metabase bootstrap complete!
+  URL           : http://localhost:3000
+  Admin email   : admin@plataforma.local
+  DB connection : id=2 (PostgreSQL via metabase_readonly)
+  Collection    : id=5 ('Chat Sessions')
+  State         : .artifacts/metabase_state.json
+============================================================
+```
+
+### Step 9: Copy `viewers.yaml` for escape hatches (optional)
 
 ```bash
 cp viewers.example.yaml viewers.yaml
@@ -218,7 +270,7 @@ After completing the Setup above, here's how to use the platform.
 ### Asking your first question
 
 ```bash
-ENV=local uv run python -m src.cli.main ask --viewer marilene_rousseau "What is the total sales amount?"
+uv run python -m src.cli.main ask --viewer marilene_rousseau "What is the total sales amount?"
 ```
 
 **What happens**:
@@ -233,8 +285,8 @@ ENV=local uv run python -m src.cli.main ask --viewer marilene_rousseau "What is 
    **RLS enforced** (constitution Principle IV, NON-NEGOTIABLE).
 6. The governed SQL is executed against PostgreSQL.
 7. You see the result: `324,280.86` (total sales for Caribbean only).
-8. If Metabase is set up, a card is automatically created in the "Chat
-   Sessions" collection — open `http://localhost:3000` to see the chart.
+8. If Metabase is set up (Step 8), a card is automatically created in the
+   "Chat Sessions" collection — open `http://localhost:3000` to see the chart.
 
 ### Useful viewer IDs
 
@@ -250,8 +302,8 @@ These come from the `People` table (24 people, each mapped to a region):
 
 You can also use the full name (with or without accents):
 ```bash
-ask --viewer "Marilène Rousseau" "..."
-ask --viewer "Marilene Rousseau" "..."
+uv run python -m src.cli.main ask --viewer "Marilène Rousseau" "..."
+uv run python -m src.cli.main ask --viewer "Marilene Rousseau" "..."
 ```
 
 To list all available people:
@@ -264,16 +316,16 @@ SELECT "Person", "Region" FROM "People" ORDER BY "Region";
 
 ```bash
 # Top 5 products by sales
-ENV=local uv run python -m src.cli.main ask --viewer marilene_rousseau "show me the top 5 products by sales"
+uv run python -m src.cli.main ask --viewer marilene_rousseau "show me the top 5 products by sales"
 
 # Sales by category
-ENV=local uv run python -m src.cli.main ask --viewer marilene_rousseau "total sales by category"
+uv run python -m src.cli.main ask --viewer marilene_rousseau "total sales by category"
 
 # Number of orders by segment
-ENV=local uv run python -m src.cli.main ask --viewer marilene_rousseau "order count by segment"
+uv run python -m src.cli.main ask --viewer marilene_rousseau "order count by segment"
 
 # Top 5 products by profit
-ENV=local uv run python -m src.cli.main ask --viewer marilene_rousseau "top 5 products by profit"
+uv run python -m src.cli.main ask --viewer marilene_rousseau "top 5 products by profit"
 ```
 
 ### Viewing Metabase cards
@@ -289,8 +341,8 @@ Or open `http://localhost:3000` → login → search for the card by name.
 ### Grouping questions into a session (dashboard)
 
 ```bash
-ENV=local uv run python -m src.cli.main ask --viewer marilene_rousseau --session my-bi-review "total sales by region"
-ENV=local uv run python -m src.cli.main ask --viewer marilene_rousseau --session my-bi-review "top 5 products by profit"
+uv run python -m src.cli.main ask --viewer marilene_rousseau --session my-bi-review "total sales by region"
+uv run python -m src.cli.main ask --viewer marilene_rousseau --session my-bi-review "top 5 products by profit"
 ```
 
 Then in Metabase → Collections → Chat Sessions → you'll see a dashboard
@@ -299,7 +351,7 @@ named **"Session: my-bi-review"** with both cards.
 ### Skipping Metabase for a single ask
 
 ```bash
-ENV=local uv run python -m src.cli.main ask --viewer marilene_rousseau "..." --no-metabase
+uv run python -m src.cli.main ask --viewer marilene_rousseau "..." --no-metabase
 ```
 
 ### Running the evaluation sanity-check
@@ -317,12 +369,12 @@ summary (`X / N correct`).
 
 | Command | Description |
 |---|---|
-| `bootstrap` | Bring up PostgreSQL in Docker, load data, write manifest. |
+| `bootstrap` | Bring up PostgreSQL + Metabase in Docker, load data, write manifest. |
 | `validate` | Single pass/fail health check (container, DB, tables, manifest, dictionary). |
 | `teardown [--remove-volume]` | Stop + remove PostgreSQL container (and optionally data volume). |
 | `generate-dictionary` | Generate `data_dictionary.md` from the loaded schema. |
 | `generate-semantic-layer` | Generate `.artifacts/semantic_layer.{json,md}` (metrics, dimensions, RLS metadata). |
-| `metabase setup` | Bring up Metabase in Docker + bootstrap admin user, DB connection, and "Chat Sessions" collection via REST API. Reproducible + idempotent. |
+| `metabase setup` | Bring up Metabase container + idempotent setup (best-effort; use `scripts/metabase_bootstrap.py` for initial bootstrap). |
 | `metabase status` | Print Metabase container status, version, DB connection, cards count. |
 | `metabase cards` | List all cards in the "Chat Sessions" collection (with viewer_id from description). |
 | `metabase teardown [--remove-volume]` | Stop + remove Metabase container (and optionally its data volume). PG warehouse untouched. |
@@ -413,6 +465,8 @@ src/
     adapters/postgres/            #   PostgreSQL adapter (repository, connection, roles)
   cli/                             # CLI entrypoints (composition root)
     main.py                       #   All commands: bootstrap, validate, ask, metabase, evaluate
+scripts/                          # Standalone scripts
+  metabase_bootstrap.py           #   Metabase initial setup (admin user + DB + collection + PG role)
 tests/                            # contract / integration / unit tests
 specs/                            # Feature specs (spec.md, plan.md, research.md, tasks.md)
   001-data-genai-platform-baseline/
