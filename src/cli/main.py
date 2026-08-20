@@ -918,6 +918,36 @@ def cmd_metabase_reset_cards() -> None:
     _info(f"Deleted {deleted}/{len(cards)} cards from 'Chat Sessions' (admin user + DB connection intact).")
 
 
+def cmd_metabase_cards() -> None:
+    """metabase cards: list all cards in the 'Chat Sessions' collection."""
+    from src.ai_engineering.metabase_client import MetabaseClient
+    from src.contracts.metabase import MetabaseConfig
+
+    state = _load_metabase_state()
+    if state is None:
+        _err("Metabase state not found; run `metabase setup` first.")
+
+    try:
+        mb_config = MetabaseConfig.from_env()
+    except ValueError as exc:
+        _err(str(exc))
+    client = MetabaseClient(mb_config)
+
+    cards = client.list_cards_in_collection(state.collection_id)
+    if not cards:
+        print("No cards found in 'Chat Sessions' collection.")
+        return
+
+    print(f"Cards in 'Chat Sessions' (collection_id={state.collection_id}):")
+    for card in cards:
+        desc = card.description or ""
+        # Extract viewer_id from description if present
+        viewer_id = "unknown"
+        if "viewer_id=" in desc:
+            viewer_id = desc.split("viewer_id=")[1].split()[0]
+        print(f"  id={card.id:>4}  name={card.name!r}  display={card.display}  viewer={viewer_id}")
+
+
 def cmd_evaluate() -> None:
     """evaluate: run the sanity-check evaluation (v1.1).
 
@@ -1032,7 +1062,7 @@ def main(argv: list[str] | None = None) -> None:
         # Subcommands: setup | status | teardown | reset-cards.
         # T011 US1: metabase setup. T029-T031 US4: the others.
         if not rest:
-            _err("Usage: python -m src.cli.main metabase <setup|status|teardown|reset-cards>")
+            _err("Usage: python -m src.cli.main metabase <setup|status|teardown|reset-cards|cards>")
         sub = rest[0]
         sub_rest = rest[1:]
         # T011 / T012-T014 (US1)
@@ -1051,8 +1081,10 @@ def main(argv: list[str] | None = None) -> None:
             if sub == "reset-cards":
                 cmd_metabase_reset_cards()
                 return
-        _err(f"Unknown metabase subcommand: {sub!r}. Use setup|status|teardown|reset-cards.")
-        return
+        if sub == "cards":
+            cmd_metabase_cards()
+            return
+        _err(f"Unknown metabase subcommand: {sub!r}. Use setup|status|teardown|reset-cards|cards.")
         return
     if command == "ask":
         # Parse v2.0/v2.1 flags: --viewer <id>, --allow-full-access,

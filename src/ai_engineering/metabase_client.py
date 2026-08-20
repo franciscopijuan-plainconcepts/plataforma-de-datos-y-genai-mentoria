@@ -131,13 +131,10 @@ class MetabaseClient:
     def is_setup_complete(self) -> bool:
         """Return True if Metabase's initial setup has already been completed.
 
-        `GET /api/session/properties` is public; if `setup-token` is null,
-        the admin user was already created.
-
-        Additional check (v0.58 compatibility): if setup-token is non-null
-        but we CAN log in with the admin creds, the setup was actually
-        completed (some versions don't clear the token immediately) —
-        treat that as setup complete too.
+        v0.58 compatibility: `setup-token` may remain non-null even after
+        setup is done. We check `has-user-setup` first (v0.58 field). If that
+        is True, setup is complete. As a fallback, try to login — if login
+        works, an admin user exists and setup is complete.
         """
         try:
             response = self._client.get("/api/session/properties")
@@ -146,6 +143,10 @@ class MetabaseClient:
             _logger.warning("Metabase session/properties check failed: %s", exc)
             return False
         props = response.json()
+        # v0.58+: has-user-setup is the canonical check.
+        if props.get("has-user-setup") is True:
+            return True
+        # Legacy check: setup-token null means setup is done.
         if not props.get("setup-token"):
             return True
         # setup-token is non-null, but maybe setup was done via the wizard
@@ -217,6 +218,10 @@ class MetabaseClient:
                 },
             }
             setup_response = self._client.post("/api/setup", json=body)
+            if setup_response.status_code == 403:
+                # "A user currently exists" — setup was already done.
+                _logger.info("Metabase setup already done (user exists); 403 from /api/setup.")
+                return False
             setup_response.raise_for_status()
         except httpx.HTTPError as exc:
             _logger.warning("Metabase setup_initial failed (non-fatal): %s", exc)
@@ -367,20 +372,31 @@ class MetabaseClient:
             return None
 
     def list_cards_in_collection(self, collection_id: int) -> list[Card]:
-        """Return all cards in the given collection (id only; SQL not returned)."""
+        """Return all cards in the given collection.
+
+        Uses GET /api/card with the `collection` query parameter (v0.58 format).
+        Falls back to listing all cards and filtering client-side if the API
+        doesn't support the filter.
+        """
         try:
+            # v0.58 expects: GET /api/card?collection_id=<id>
             response = self._request_with_reauth(
-                "GET", f"/api/card?f=collection_id%3D{collection_id}"
+                "GET", f"/api/card?collection_id={collection_id}"
             )
             response.raise_for_status()
             items = response.json()
+            # The response may be a list or a paginated dict with a 'data' key.
+            if isinstance(items, dict) and "data" in items:
+                items = items["data"]
+            if not isinstance(items, list):
+                items = []
             return [
                 Card(
                     id=int(item["id"]),
                     name=str(item.get("name", "")),
-                    sql="",  # list endpoint doesn't return SQL
+                    sql=" ",  # list endpoint doesn't return SQL; use space to satisfy min_length=1
                     collection_id=collection_id,
-                    display=item.get("display", "table"),
+                    display=item.get("display", "table") if item.get("display") in ("scalar", "table", "bar", "line", "area") else "table",
                     description=item.get("description"),
                     created_at=None,
                 )
