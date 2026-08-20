@@ -2,7 +2,7 @@
 
 - **Source file**: `/home/franciscopijuan/PROJECTS/MENTORIA/Plataforma_de_Datos_y_GenAI/Global Superstore Data.xlsx`
 - **Source SHA-256**: `d7a805f6cfd26339f478a3de6a6f128ea156179be093e09a1f528776fd5fdc3e`
-- **Generated at**: 2026-08-20T12:04:52.343001+00:00
+- **Generated at**: 2026-08-20T13:47:49.614365+00:00
 - **Tables**: `Orders` (Transactional Logs), `Returns` (Reverse Logistics), `People` (Sales Governance)
 
 > This dictionary integrates Kaggle semantic descriptions with EDA-derived database types. Regeneratable via `uv run python -m src.cli.main generate-dictionary` (FR-012).

@@ -1,7 +1,7 @@
 # Semantic Layer — Plataforma de Datos y GenAI
 
 - **Version**: `1.0.0`
-- **Generated at**: `2026-08-20T12:04:58.725237+00:00`
+- **Generated at**: `2026-08-20T13:47:56.429914+00:00`
 - **Source SHA-256** (load manifest provenance): `d7a805f6cfd26339f478a3de6a6f128ea156179be093e09a1f528776fd5fdc3e`
 - **Semantic source SHA-256** (`semantic_source.py` provenance): `e40350ee0d0b56a3b8c0cf0323650ee6217c83a530e5045dfc9ea429fddd0bba`
 

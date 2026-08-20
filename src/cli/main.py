@@ -61,9 +61,11 @@ _SEMANTIC_LAYER_MD_PATH = _REPO_ROOT / ".artifacts" / "semantic_layer.md"
 # Expected row counts from the EDA (see research.md Part A) — the validator
 # uses these to confirm the loaded warehouse matches the canonical dataset.
 
-# Load .env from the repository root so FORGE_API_KEY and POSTGRES_* are
-# available without manually sourcing .env. Safe if .env doesn't exist.
-load_dotenv(_REPO_ROOT / ".env")
+# Load .env from the repository root so FORGE_API_KEY, POSTGRES_*, METABASE_*,
+# and ENV are all available without manually sourcing .env. `override=True`
+# ensures .env values take precedence over any pre-existing environment vars
+# (so ENV=local in .env is respected even if the shell doesn't set it).
+load_dotenv(_REPO_ROOT / ".env", override=True)
 _EXPECTED_ROW_COUNTS = {
     "Orders": 51290,
     "Returns": 2033,

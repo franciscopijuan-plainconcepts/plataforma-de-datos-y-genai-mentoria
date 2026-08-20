@@ -249,9 +249,11 @@ class MetabaseClient:
         """
         try:
             headers = self._ensure_session()
-            list_response = self._client.get("/api/database", headers=headers)
+            # List existing DBs — v0.58 returns paginated dict with 'data' key.
+            list_response = self._client.get("/api/database?limit=50", headers=headers)
             list_response.raise_for_status()
-            existing = list_response.json().get("data", [])
+            list_data = list_response.json()
+            existing = list_data.get("data", list_data) if isinstance(list_data, dict) else list_data
             for db in existing:
                 if db.get("name") == db_name:
                     _logger.info(
@@ -260,6 +262,8 @@ class MetabaseClient:
                         db.get("id"),
                     )
                     return int(db.get("id", 0)) or None
+
+            # Create the DB connection.
             body: dict[str, object] = {
                 "engine": "postgres",
                 "name": db_name,
@@ -272,8 +276,8 @@ class MetabaseClient:
                     "ssl": False,
                 },
             }
-            create_response = self._request_with_reauth(
-                "POST", "/api/database", json_payload=body
+            create_response = self._client.post(
+                "/api/database", headers=self._ensure_session(), json=body
             )
             create_response.raise_for_status()
             return int(create_response.json().get("id", 0)) or None
