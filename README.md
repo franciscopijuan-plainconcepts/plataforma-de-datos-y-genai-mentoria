@@ -338,6 +338,22 @@ uv run python -m src.cli.main metabase cards
 
 Or open `http://localhost:3000` → login → search for the card by name.
 
+### Using the admin_dev escape hatch (local/dev only)
+
+If you need to run a query WITHOUT RLS filtering (e.g., to debug a data issue
+or verify row counts across all regions), use the `admin_dev` viewer defined in
+`viewers.yaml`:
+
+```bash
+uv run python -m src.cli.main ask --viewer admin_dev "total sales across all regions"
+```
+
+**Warning**: this bypasses RLS. It only works when `ENV=local` (or `dev`/`test`).
+Every call is logged with `gov_bypass=True` in `.artifacts/text_to_sql.log`
+for audit traceability. In any other environment, the escape hatch is silently
+forced to `allows_full_access=False` and the viewer sees 0 rows (governance
+is non-negotiable per constitution Principle IV).
+
 ### Grouping questions into a session (dashboard)
 
 ```bash
