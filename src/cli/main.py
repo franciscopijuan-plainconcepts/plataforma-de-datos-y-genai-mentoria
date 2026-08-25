@@ -24,10 +24,11 @@ import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from dotenv import load_dotenv
 
+from src.contracts.data_access import TableDef
 from src.contracts.ingestion import SchemaInferenceResult
 from src.data_access.adapters.postgres.connection import PostgresConfig
 from src.data_access.adapters.postgres.repository import PostgresRepository
@@ -150,6 +151,17 @@ def _info(msg: str) -> None:
 # ---------------------------------------------------------------------------
 # Commands
 # ---------------------------------------------------------------------------
+def _infer_orders_table_def() -> TableDef:
+    """Infer the Orders table definition from the canonical workbook."""
+    if not _DEFAULT_SOURCE.exists():
+        _err(f"Source workbook not found: {_DEFAULT_SOURCE}")
+    tables, _ = explore_workbook(_DEFAULT_SOURCE)
+    table_defs = infer_table_defs(tables)
+    orders_def = next((td for td in table_defs if td.name == "Orders"), None)
+    if orders_def is None:
+        _err("Orders table not found in inferred schema.")
+    return orders_def
+
 
 def cmd_bootstrap(source_file: str | None = None) -> None:
     """bootstrap: bring up PostgreSQL, run EDA, create schema, load data, write manifest."""
@@ -549,6 +561,108 @@ def cmd_ask(
             print(f"Latency: {response.query_result.latency_ms}ms")
 
 
+def cmd_train_sales_model() -> None:
+    """train-sales-model: train, compare, and persist both sales models."""
+    from src.mlops.registry import ArtifactRegistry, RegistryError
+    from src.mlops.training import train_sales_models
+
+    if not _docker_available():
+        _err("Docker is not running. Run `bootstrap` first to start the warehouse.")
+
+    orders_def = _infer_orders_table_def()
+    config = PostgresConfig.from_env()
+    registry = ArtifactRegistry()
+
+    try:
+        with PostgresRepository(config=config) as repo:
+            linear_entry, catboost_entry = train_sales_models(repo, orders_def, registry)
+    except (RegistryError, ValueError) as exc:
+        _err(str(exc))
+    except Exception as exc:
+        _err(f"train-sales-model failed: {exc}")
+
+    linear_metadata = registry.read_run_metadata(linear_entry)
+    catboost_metadata = registry.read_run_metadata(catboost_entry)
+
+    print("Model comparison (same test set, same split):")
+    print(f"{'model':<20} {'rmse':>12} {'mae':>12} {'r2':>12} {'training_ms':>12}")
+    print(f"{'-' * 20} {'-' * 12} {'-' * 12} {'-' * 12} {'-' * 12}")
+    print(
+        f"{linear_entry.model_name:<20} "
+        f"{linear_entry.metrics.rmse:>12.4f} "
+        f"{linear_entry.metrics.mae:>12.4f} "
+        f"{linear_entry.metrics.r2:>12.4f} "
+        f"{linear_metadata.training_duration_ms:>12}"
+    )
+    print(
+        f"{catboost_entry.model_name:<20} "
+        f"{catboost_entry.metrics.rmse:>12.4f} "
+        f"{catboost_entry.metrics.mae:>12.4f} "
+        f"{catboost_entry.metrics.r2:>12.4f} "
+        f"{catboost_metadata.training_duration_ms:>12}"
+    )
+
+    better = linear_entry if linear_entry.metrics.rmse <= catboost_entry.metrics.rmse else catboost_entry
+    print(f"Better RMSE: {better.model_name} (run_id={better.run_id})")
+    print("")
+    print("Persisted runs:")
+    print(f"  {linear_entry.model_name} -> .artifacts/mlops/models/{linear_entry.model_name}/{linear_entry.run_id}/")
+    print(f"  {catboost_entry.model_name} -> .artifacts/mlops/models/{catboost_entry.model_name}/{catboost_entry.run_id}/")
+
+
+def cmd_promote_sales_model(run_id: str, environment: str, force: bool = False) -> None:
+    """promote-sales-model: promote a persisted run into an environment."""
+    from src.mlops.registry import ArtifactRegistry, PromotionGateError, RegistryError, UnknownRunIdError
+
+    registry = ArtifactRegistry()
+    try:
+        record = registry.promote(
+            run_id=run_id,
+            environment=cast("Any", environment),
+            force_bypass_staging_gate=force,
+        )
+    except (PromotionGateError, RegistryError, UnknownRunIdError) as exc:
+        _err(str(exc))
+
+    if record.bypassed_staging_gate:
+        _info(
+            f"GOVERNANCE BYPASS: promoted run_id={run_id} directly to prod with --force."
+        )
+    print(
+        f"Promoted run_id={record.run_id} to env={record.environment} "
+        f"at {record.promoted_at.isoformat()} bypassed_staging_gate={str(record.bypassed_staging_gate).lower()}"
+    )
+
+
+def cmd_predict_sales(environment: str, input_payload: dict[str, str]) -> None:
+    """predict-sales: run inference with the model promoted in an environment."""
+    from pydantic import ValidationError
+
+    from src.contracts.mlops import PredictionInput
+    from src.mlops.inference import predict_sales
+    from src.mlops.registry import ArtifactRegistry, NoActiveModelError, RegistryError
+
+    try:
+        prediction_input = PredictionInput.model_validate(input_payload)
+    except ValidationError as exc:
+        _err(f"Invalid predict-sales input: {exc}")
+
+    registry = ArtifactRegistry()
+    try:
+        result = predict_sales(registry, cast("Any", environment), prediction_input)
+    except (NoActiveModelError, RegistryError) as exc:
+        _err(str(exc))
+    except Exception as exc:
+        _err(f"predict-sales failed: {exc}")
+
+    print(f"Predicted Sales: {result.predicted_sales}")
+    print(
+        f"Model: {result.model_name} (run_id={result.run_id}, environment={result.environment})"
+    )
+    print(f"used_fallback_encoding: {str(result.used_fallback_encoding).lower()}")
+    print(f"latency_ms: {result.latency_ms}")
+
+
 def cmd_generate_semantic_layer() -> None:
     """generate-semantic-layer: build and persist the Semantic Layer v2.0 artifact.
 
@@ -694,6 +808,9 @@ _COMMANDS = {
     "generate-semantic-layer": None,  # v2.0 — has special arg handling in main()
     "ask": None,  # has special arg handling in main()
     "evaluate": None,  # has special arg handling in main()
+    "train-sales-model": None,
+    "promote-sales-model": None,
+    "predict-sales": None,
 }
 
 
@@ -701,7 +818,7 @@ def main(argv: list[str] | None = None) -> None:
     """CLI entrypoint: `python -m src.cli <command>`."""
     args = argv if argv is not None else sys.argv[1:]
     if not args or args[0] in ("-h", "--help"):
-        print("Usage: python -m src.cli.main {bootstrap|teardown|validate|generate-dictionary|generate-semantic-layer|ask|evaluate} [args]")
+        print("Usage: python -m src.cli.main {bootstrap|teardown|validate|generate-dictionary|generate-semantic-layer|ask|evaluate|train-sales-model|promote-sales-model|predict-sales} [args]")
         print("Commands:")
         print("  bootstrap [--source PATH]        Bring up PG, load data, write manifest")
         print("  teardown [--remove-volume]        Stop & remove container (and optionally volume)")
@@ -713,6 +830,11 @@ def main(argv: list[str] | None = None) -> None:
         print("                                       People table, or a custom viewer from")
         print("                                       viewers.yaml)")
         print("  evaluate                           Run sanity-check evaluation (v1.1)")
+        print("  train-sales-model                  Train, compare, and persist both sales models")
+        print("  promote-sales-model --run-id ID --env {dev,staging,prod} [--force]")
+        print("                                      Promote a persisted run to an environment")
+        print("  predict-sales --env ENV --ship-mode ... --order-date YYYY-MM-DD")
+        print("                                      Predict sales using the promoted model")
         sys.exit(0 if args else 1)
 
     command = args[0]
@@ -754,9 +876,75 @@ def main(argv: list[str] | None = None) -> None:
     if command == "evaluate":
         cmd_evaluate()
         return
+    if command == "train-sales-model":
+        cmd_train_sales_model()
+        return
+    if command == "promote-sales-model":
+        run_id: str | None = None
+        environment: str | None = None
+        force = False
+        i = 0
+        while i < len(rest):
+            tok = rest[i]
+            if tok == "--run-id" and i + 1 < len(rest):
+                run_id = rest[i + 1]
+                i += 2
+                continue
+            if tok == "--env" and i + 1 < len(rest):
+                environment = rest[i + 1]
+                i += 2
+                continue
+            if tok == "--force":
+                force = True
+                i += 1
+                continue
+            _err("Usage: python -m src.cli.main promote-sales-model --run-id <id> --env <dev|staging|prod> [--force]")
+        if run_id is None or environment is None:
+            _err("Usage: python -m src.cli.main promote-sales-model --run-id <id> --env <dev|staging|prod> [--force]")
+        if environment not in {"dev", "staging", "prod"}:
+            _err(f"Invalid environment: {environment!r}. Use dev|staging|prod.")
+        cmd_promote_sales_model(run_id, environment, force=force)
+        return
+    if command == "predict-sales":
+        predict_environment: str | None = None
+        payload: dict[str, str] = {}
+        expected_flags = {
+            "--ship-mode": "ship_mode",
+            "--segment": "segment",
+            "--region": "region",
+            "--market": "market",
+            "--product-id": "product_id",
+            "--sub-category": "sub_category",
+            "--category": "category",
+            "--quantity": "quantity",
+            "--discount": "discount",
+            "--order-date": "order_date",
+        }
+        i = 0
+        while i < len(rest):
+            tok = rest[i]
+            if tok == "--env" and i + 1 < len(rest):
+                predict_environment = rest[i + 1]
+                i += 2
+                continue
+            field_name = expected_flags.get(tok)
+            if field_name is not None and i + 1 < len(rest):
+                payload[field_name] = rest[i + 1]
+                i += 2
+                continue
+            _err("Usage: python -m src.cli.main predict-sales --env <dev|staging|prod> --ship-mode ... --order-date YYYY-MM-DD")
+        if predict_environment is None:
+            _err("predict-sales requires --env <dev|staging|prod>.")
+        if predict_environment not in {"dev", "staging", "prod"}:
+            _err(f"Invalid environment: {predict_environment!r}. Use dev|staging|prod.")
+        missing = [name for name in expected_flags.values() if name not in payload]
+        if missing:
+            _err(f"predict-sales is missing required flags for: {missing}")
+        cmd_predict_sales(predict_environment, payload)
+        return
     handler = _COMMANDS.get(command)
     if handler is None:
-        _err(f"Unknown command: {command!r}. Use bootstrap|teardown|validate.")
+        _err(f"Unknown command: {command!r}. Use bootstrap|teardown|validate|generate-dictionary|generate-semantic-layer|ask|evaluate|train-sales-model|promote-sales-model|predict-sales.")
 
     # Parse simple per-command args.
     if command == "bootstrap":

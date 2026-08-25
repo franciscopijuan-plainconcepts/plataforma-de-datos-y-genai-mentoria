@@ -2,10 +2,10 @@
 
 A Data and GenAI Platform that connects Generative AI to a Data Warehouse.
 
-> **Status**: v2.0 — Baseline + Text-to-SQL + Semantic Layer (with RLS governance).
-> The warehouse, data dictionary, NL→SQL pipeline, and governed Semantic Layer
-> are all delivered. See `specs/` for the feature_specs and
-> `README_STATUS.md` for the current roadmap (milestones M0–M3 delivered).
+> **Status**: v3.0 — Baseline + Text-to-SQL + Semantic Layer + Sales Prediction MLOps.
+> The warehouse, data dictionary, NL→SQL pipeline, governed Semantic Layer,
+> and end-to-end sales-model training/promotion/inference flow are delivered.
+> See `specs/` and `README_STATUS.md` for the roadmap (milestones M0–M4 delivered).
 
 ## What the platform delivers
 
@@ -44,6 +44,25 @@ A Data and GenAI Platform that connects Generative AI to a Data Warehouse.
   metrics + dimensions + Returns-join notes so the LLM distinguishes
   gross_sales from net_sales.
 
+### Sales Prediction Model (M4 / v3.0 MLOps)
+
+- A new isolated `src/mlops/` domain trains two `Sales` regressors over `Orders`:
+  a `LinearRegression` baseline and a `CatBoostRegressor` with native categorical handling.
+- Features: temporal fields derived from `Order Date`, `Ship Mode`, `Segment`,
+  `Region`, `Market`, `Product ID`, `Sub-Category`, `Category`, `Quantity`,
+  `has_discount`. `City`/`State`/`Country`/`Product Name` were deliberately
+  excluded — see `specs/004-sales-prediction-model/spec.md` § Amendment for the
+  cardinality-based rationale (redundant with `Region`/`Market`/`Product ID`,
+  no incremental signal, confirmed empirically by retraining).
+- `train-sales-model` extracts training data only through the `QueryProvider`,
+  applies shared feature engineering, performs a chronological split, compares
+  RMSE/MAE/R² side by side, and persists both runs in `.artifacts/mlops/`.
+- `promote-sales-model` enforces staged promotion (`dev`/`staging`/`prod`) with
+  an explicit `--force` governance bypass recorded in the registry history.
+- `predict-sales` loads the promoted model for an environment, reuses the exact
+  same feature derivation logic as training, logs latency/input/output, and
+  degrades gracefully on unseen categories (`used_fallback_encoding`).
+
 ## Team Handoff Docs
 
 - [README_SPECKIT.md](README_SPECKIT.md): how Spec Kit was used in this repo,
@@ -55,7 +74,7 @@ A Data and GenAI Platform that connects Generative AI to a Data Warehouse.
 ## Prerequisites
 
 - [Docker](https://www.docker.com/) (with Docker Compose) installed and running.
-- [`uv`](https://docs.astral.sh/uv/) (manages Python and dependencies).
+- [`uv`](https://docs.astral.sh/uv/) (manages Python and dependencies, including `scikit-learn` and `catboost`).
 - The source file `Global Superstore Data.xlsx` in the repository root.
 - A `.env` file with `FORGE_API_KEY` set (copy `.env.example` and fill it).
 - For Semantic Layer RLS: real-person viewers resolve directly from the
@@ -87,14 +106,23 @@ uv run python -m src.cli.main ask --viewer marilene_rousseau "What is the total 
 #    Or escape-hatch in local/dev (no RLS):
 # uv run python -m src.cli.main ask --allow-full-access "What is the total sales amount?"
 
-# 7. Tear down the environment when done
+# 7. Train and compare the two sales-prediction models
+uv run python -m src.cli.main train-sales-model
+
+# 8. Promote a persisted run to an environment
+uv run python -m src.cli.main promote-sales-model --run-id <run_id> --env staging
+
+# 9. Predict Sales with the promoted model
+uv run python -m src.cli.main predict-sales --env prod --ship-mode "Standard Class" --segment "Home Office" --region "Southern Asia" --market "Asia Pacific" --product-id "FUR-BO-4861" --sub-category "Bookcases" --category "Furniture" --quantity 2 --discount 0.0 --order-date 2017-03-22
+
+# 10. Tear down the environment when done
 uv run python -m src.cli.main teardown
 ```
 
 See [`specs/001-data-genai-platform-baseline/quickstart.md`](specs/001-data-genai-platform-baseline/quickstart.md)
 for the baseline validation guide and
 [`specs/003-semantic-layer-v1/quickstart.md`](specs/003-semantic-layer-v1/quickstart.md)
-for the Semantic Layer RLS validation guide.
+for the Semantic Layer RLS validation guide, and [`specs/004-sales-prediction-model/quickstart.md`](specs/004-sales-prediction-model/quickstart.md) for the MLOps train→promote→predict validation guide.
 
 ### Clean-clone bootstrap (T026 / FR-016)
 
@@ -153,8 +181,7 @@ The platform follows the constitution in
 - **Layered separation of concerns**: Data Engineering / AI Engineering / MLOps.
 - **Portable data access**: engine-specific code confined to adapters; local
   dev uses Docker + PostgreSQL only.
-- **Data Governance by default** (deferred to v2.0, but the data model is
-  kept governance-ready).
+- **Data Governance by default** (satisfied on the NL→SQL path via the governed Semantic Layer; the batch MLOps training path is an explicit, documented Principle IV deferral).
 
 See [`specs/001-data-genai-platform-baseline/plan.md`](specs/001-data-genai-platform-baseline/plan.md)
 for the full project structure and design decisions.
@@ -164,9 +191,11 @@ for the full project structure and design decisions.
 ```text
 docker/                # PostgreSQL Docker Compose service
 src/
-├── contracts/        # Shared typed contracts (Pydantic v2 models)
-├── data_engineering/ # EDA, ingestion, dictionary, validation
+├── contracts/        # Shared typed contracts (Pydantic v2 models, incl. mlops)
+├── data_engineering/ # EDA, ingestion, dictionary, validation, semantic layer
+├── ai_engineering/   # Text-to-SQL pipeline, prompt builder, evaluation
 ├── data_access/      # Engine-agnostic data-access layer + adapters
+├── mlops/            # Sales-model training, registry, promotion, inference
 └── cli/              # CLI entrypoints
 tests/                # contract / integration / unit tests
 ```

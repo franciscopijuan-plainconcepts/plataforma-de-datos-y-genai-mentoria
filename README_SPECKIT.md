@@ -11,11 +11,12 @@ Guia de continuidad para el equipo sobre como usamos Spec Kit en este proyecto, 
 
 ## Resumen de lo que ya hicimos con Spec Kit
 
-Se ejecutaron tres features completas con Spec Kit:
+Se ejecutaron cuatro features completas con Spec Kit:
 
 1. **Feature 001 (`data-genai-platform-baseline`)** — v0 baseline: PostgreSQL en Docker, data dictionary, CLI bootstrap/teardown/validate/generate-dictionary, contratos tipados, tests de contrato e integracion.
 2. **Feature 002 (`text-to-sql-v1`)** — v1.0/v1.1: pipeline NL→SQL sobre Orders via Forge proxy, `ask` + `evaluate` CLI, logging estructurado, sanity-check de ~10 preguntas.
 3. **Feature 003 (`semantic-layer-v1`)** — v2.0: Semantic Layer con métricas/dimensiones/relaciones + RLS por `Region` usando `People`. Satisface constitution Principle IV por primera vez.
+4. **Feature 004 (`sales-prediction-model`)** — v3.0: dominio `src/mlops/` aislado con `train-sales-model`, artifact registry `.artifacts/mlops/registry.json`, staged promotion (`promote-sales-model`) e inferencia (`predict-sales`).
 
 Cada feature siguio el flujo completo: constitution (solo 001), spec, plan + research + data-model + contracts + quickstart, tasks, implement por fases, validacion. La feature 003 introdujo:
 - `src/data_engineering/semantic_layer/` subpaquete (builder, resolver, governed_provider, registry, metrics, render).
@@ -40,7 +41,7 @@ Para la feature 001, el detalle del flujo abajo se mantiene como referencia:
 - [specs/001-data-genai-platform-baseline/quickstart.md](specs/001-data-genai-platform-baseline/quickstart.md)
 5. Tareas accionables generadas y cerradas en [specs/001-data-genai-platform-baseline/tasks.md](specs/001-data-genai-platform-baseline/tasks.md).
 
-Resultado: baseline v0 implementado con warehouse local PostgreSQL + data dictionary + CLI + contratos tipados + tests de contrato e integracion.
+Resultado: la plataforma ya recorrió cuatro features completas y cubre Data Engineering + AI Engineering + Semantic Governance + MLOps local reproducible.
 
 ## Estructura OpenSpec en este repo
 
@@ -99,7 +100,7 @@ Nota: en este repo se trabajo principalmente desde los comandos conversacionales
 ## Como se mapea Spec Kit al codigo fuente
 
 - Spec y contratos viven en [specs/001-data-genai-platform-baseline](specs/001-data-genai-platform-baseline).
-- Implementacion vive en [src](src).
+- Implementacion vive en [src](src), ahora con `src/mlops/` como tercer dominio de ingeniería además de `data_engineering` y `ai_engineering`.
 - Calidad y regresion viven en [tests](tests).
 - Runtime local de BD vive en [docker/docker-compose.yml](docker/docker-compose.yml).
 - Evidencias generadas:
@@ -111,7 +112,7 @@ Regla practica: no implementar nada que no este trazado en spec/plan/tasks, salv
 ## Convenciones acordadas en esta baseline
 
 - Tipado estricto en Python y contratos Pydantic para cruces entre capas.
-- Separacion clara de responsabilidades (data_engineering, ai_engineering, data_access, contracts, cli).
+- Separacion clara de responsabilidades (data_engineering, ai_engineering, mlops, data_access, contracts, cli).
 - Codigo de engine PostgreSQL aislado en adapters.
 - Sin adelantar alcance de features posteriores (v1.x no introdujo Semantic Layer; v2.0 lo entregó completo).
 - Pruebas de contrato para boundaries + pruebas de integracion contra PostgreSQL real en Docker.
@@ -119,6 +120,9 @@ Regla practica: no implementar nada que no este trazado en spec/plan/tasks, salv
 - **v2.0 (Governance)**: ningún caller de `execute_readonly_query` en `src/ai_engineering/` puede importar el adapter directo; siempre debe recibir un `QueryProvider` (idealmente un `GovernedQueryProvider` wrapper) para que RLS aplique. `GovernedQueryProvider` es el single enforcement point de Principle IV.
 - **v2.0 (Viewer config)**: `viewers.yaml` es local-only (gitignored); el template committed es `viewers.example.yaml`. `SEMANTIC_VIEWERS_FILE` overridea el path; `ENV` gatea `allows_full_access` (solo local/dev/test).
 - **v2.0 (Determinismo)**: `semantic_layer.json` excluye `generated_at` (timestamp va solo al `.md`) para ser byte-determinista entre regeneraciones (SC-005).
+- **v3.0 (MLOps)**: `scikit-learn` y `catboost` quedan confinados a `src/mlops/` por boundary tests; `src/mlops/` nunca importa `psycopg` ni internals de `data_engineering`/`ai_engineering`.
+- **v3.0 (Artifact registry)**: `.artifacts/mlops/registry.json` es la fuente de verdad del tracking/promoción; cada run vive en `.artifacts/mlops/models/<model_name>/<run_id>/` con `params.json`, `metrics.json`, `data_hash.txt` y el artifact serializado.
+- **v3.0 (Reproducibilidad)**: el training usa `QueryProvider` + SQL validator compartido + hash determinista del `FeatureSet`; mismas entradas producen mismas métricas.
 
 ## Como continuar con la siguiente feature (playbook de equipo)
 
@@ -157,6 +161,13 @@ Regla practica: no implementar nada que no este trazado en spec/plan/tasks, salv
 - **`allows_full_access` fuera de local/dev**: el `ViewerRegistry` fuerza `allows_full_access=False` si `ENV` no esta en `{local, dev, test}` (defense-in-depth — no basta con el yaml para escapar governance en prod).
 
 Si aparece un problema similar, revisar primero contratos, adapter PostgreSQL, loader y tests de boundary.
+
+### En v3.0 (MLOps):
+
+- **Boundary vs validator compartido**: `src/mlops/` no puede depender de `src.ai_engineering/`; por eso el SQL validator se extrajo a `src/data_access/sql_validator.py` y `ai_engineering/sql_validator.py` quedó como wrapper de compatibilidad.
+- **SQL quoted identifiers**: la extracción de `Orders` debe usar `"Orders"` / `"Order Date"` / `"Row ID"` porque PostgreSQL creó la tabla con identifiers quoted y case-sensitive.
+- **Fallback de categorías no vistas**: la señal `used_fallback_encoding` depende del vocabulario persistido junto al artifact; no alcanza con confiar en que sklearn/CatBoost no lancen excepción.
+- **Registry todo-o-nada**: cualquier escritura parcial debe quedar fuera de `registry.json`; el manifiesto es el contrato visible, no solo la existencia del directorio del run.
 
 ## Referencias internas recomendadas
 

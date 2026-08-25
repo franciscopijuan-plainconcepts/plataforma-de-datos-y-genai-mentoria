@@ -269,3 +269,97 @@ def test_no_ai_engineering_direct_adapter_import() -> None:
         "ai_engineering bypasses the QueryProvider Protocol by importing the "
         f"adapter directly — constitution Principle IV violation: {offenders}."
     )
+
+
+# ---------------------------------------------------------------------------
+# Boundary 7 (v3.0): sklearn/catboost confined to src/mlops
+# ---------------------------------------------------------------------------
+
+_ALLOWED_MLOPS_DIR = _REPO_ROOT / "src" / "mlops"
+
+
+@pytest.mark.parametrize("guarded_module", ["sklearn", "catboost"])
+def test_ml_libraries_confined_to_mlops(guarded_module: str) -> None:
+    """`sklearn`/`catboost` MUST NOT be imported outside the MLOps domain."""
+    src_root = _REPO_ROOT / "src"
+    offenders: list[str] = []
+    for py_file in _iter_python_files(src_root):
+        if guarded_module not in _top_level_modules(py_file):
+            continue
+        if _is_under(py_file, {_ALLOWED_MLOPS_DIR}):
+            continue
+        offenders.append(str(py_file.relative_to(_REPO_ROOT)))
+    assert not offenders, (
+        f"{guarded_module} imported outside the MLOps domain: {offenders}. "
+        f"Only {_ALLOWED_MLOPS_DIR} may import {guarded_module}."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Boundary 8 (v3.0): src/mlops must not import psycopg or other domain internals
+# ---------------------------------------------------------------------------
+
+
+def test_mlops_domain_has_no_forbidden_imports() -> None:
+    """MLOps stays isolated from engine-specific and sibling-domain internals."""
+    mlops_root = _REPO_ROOT / "src" / "mlops"
+    forbidden_modules = {
+        "psycopg",
+        "src.data_engineering",
+        "src.ai_engineering",
+    }
+    offenders: list[str] = []
+    for py_file in _iter_python_files(mlops_root):
+        try:
+            tree = ast.parse(py_file.read_text(encoding="utf-8"))
+        except SyntaxError:
+            continue
+        full_modules: set[str] = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    full_modules.add(alias.name)
+            elif isinstance(node, ast.ImportFrom) and node.module is not None and node.level == 0:
+                full_modules.add(node.module)
+        bad = sorted(
+            module
+            for module in full_modules
+            if any(
+                module == forbidden or module.startswith(f"{forbidden}.")
+                for forbidden in forbidden_modules
+            )
+        )
+        if bad:
+            offenders.append(f"{py_file.relative_to(_REPO_ROOT)} -> {bad}")
+    assert not offenders, (
+        "src/mlops/ imported forbidden engine-specific or cross-domain internals: "
+        f"{offenders}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Boundary 9 (v3.0): MLOps contracts are Pydantic v2 frozen models
+# ---------------------------------------------------------------------------
+
+
+def test_mlops_contract_models_are_pydantic_and_frozen() -> None:
+    """All MLOps boundary models must be frozen Pydantic models."""
+    from pydantic import BaseModel
+
+    from src.contracts import mlops as mlops_contracts
+
+    model_names = [
+        "SalesFeatureRow",
+        "FeatureSet",
+        "ModelRunMetadata",
+        "EvaluationMetrics",
+        "ArtifactRegistryEntry",
+        "PromotionRecord",
+        "ArtifactRegistryDocument",
+        "PredictionInput",
+        "PredictionResult",
+    ]
+    for name in model_names:
+        model_cls = getattr(mlops_contracts, name)
+        assert issubclass(model_cls, BaseModel), f"{name} must be a Pydantic model"
+        assert model_cls.model_config.get("frozen") is True, f"{name} must be frozen"
