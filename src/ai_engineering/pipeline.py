@@ -13,6 +13,7 @@ from __future__ import annotations
 import time
 import logging
 from pathlib import Path
+from typing import Callable, Union
 
 from src.ai_engineering.llm_client import LlmClient
 from src.ai_engineering.prompt_builder import build_prompt
@@ -30,6 +31,17 @@ from src.contracts.text_to_sql import (
     ValidationResult,
 )
 from src.data_access.interfaces import QueryProvider
+
+# v2.1 (feature 004-metabase-integration): optional sink callback invoked at
+# the end of a successful `run()`. Generic by design — the pipeline does NOT
+# reference Metabase (or any other sink) directly; the CLI composition root
+# injects the concrete sink (see `contracts/pipeline_integration.md`).
+# The callback receives `response.query_result.sql` which is the ALREADY-
+# GOVERNED SQL (post-GovernedQueryProvider, post-RLS injection) so any sink
+# that sends SQL onward to e.g. Metabase preserves Principle IV NON-NEGOTIABLE.
+OnQueryComplete = Callable[
+    [TextToSqlResponse, Union[SemanticViewer, None]], None
+]
 
 _logger = logging.getLogger(__name__)
 
@@ -97,6 +109,7 @@ class TextToSqlPipeline:
         llm_config: LlmConfig,
         semantic_layer: SemanticLayerDocument | None = None,
         viewer: SemanticViewer | None = None,
+        on_query_complete: OnQueryComplete | None = None,
     ) -> None:
         self._dictionary = dictionary
         self._table_def = table_def
@@ -110,6 +123,12 @@ class TextToSqlPipeline:
         # The actual RLS enforcement happens in GovernedQueryProvider (the
         # query_provider delegate); the pipeline only logs the viewer for audit.
         self._viewer = viewer
+        # v2.1: optional sink callback invoked after a successful `run()`.
+        # Best-effort: any exception thrown by the callback is swallowed and
+        # logged as a warning — sinks must NOT break the pipeline (FR-013). The
+        # callback receives `response.query_result.sql` (governed) so sinks
+        # like Metabase preserve Principle IV NON-NEGOTIABLE by design.
+        self._on_query_complete = on_query_complete
 
     def run(self, question: NLQuestion) -> TextToSqlResponse:
         """Run the full Text-to-SQL pipeline for a single question.
@@ -201,6 +220,18 @@ class TextToSqlPipeline:
             query_result=result,
         )
         _log_call(response, latency_ms, self._viewer)
+        # v2.1 (feature 004-metabase-integration): invoke the optional sink
+        # callback at the END of a successful `run()`. Best-effort (FR-013):
+        # any exception is swallowed and logged, so the pipeline never breaks
+        # because Metabase (or any sink) is unavailable.
+        if self._on_query_complete is not None:
+            try:
+                self._on_query_complete(response, self._viewer)
+            except Exception as exc:  # noqa: BLE001 — sinks must be best-effort
+                _logger.warning(
+                    "on_query_complete callback failed (best-effort, swallowed): %s",
+                    exc,
+                )
         return response
 
 

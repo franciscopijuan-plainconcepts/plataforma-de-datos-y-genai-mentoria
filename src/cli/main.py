@@ -24,7 +24,7 @@ import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from dotenv import load_dotenv
 
@@ -42,6 +42,12 @@ from src.data_engineering.ingestion.manifest import (
     write_manifest,
 )
 
+if TYPE_CHECKING:
+    # Avoid top-level import cycle: MetabaseSession is used only in type hints
+    # of private helpers that are invoked after the runtime import inside the
+    # commands (e.g., `from src.contracts.metabase import MetabaseSession`).
+    from src.contracts.metabase import MetabaseSession
+
 # --- Repository root + file paths ---
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _COMPOSE_FILE = _REPO_ROOT / "docker" / "docker-compose.yml"
@@ -55,9 +61,11 @@ _SEMANTIC_LAYER_MD_PATH = _REPO_ROOT / ".artifacts" / "semantic_layer.md"
 # Expected row counts from the EDA (see research.md Part A) — the validator
 # uses these to confirm the loaded warehouse matches the canonical dataset.
 
-# Load .env from the repository root so FORGE_API_KEY and POSTGRES_* are
-# available without manually sourcing .env. Safe if .env doesn't exist.
-load_dotenv(_REPO_ROOT / ".env")
+# Load .env from the repository root so FORGE_API_KEY, POSTGRES_*, METABASE_*,
+# and ENV are all available without manually sourcing .env. `override=True`
+# ensures .env values take precedence over any pre-existing environment vars
+# (so ENV=local in .env is respected even if the shell doesn't set it).
+load_dotenv(_REPO_ROOT / ".env", override=True)
 _EXPECTED_ROW_COUNTS = {
     "Orders": 51290,
     "Returns": 2033,
@@ -327,6 +335,8 @@ def cmd_ask(
     question: str,
     viewer_id: str | None = None,
     allow_full_access: bool = False,
+    metabase_enabled: bool = True,
+    session_id: str | None = None,
 ) -> None:
     """ask: translate a natural-language question to SQL and return results.
 
@@ -342,6 +352,16 @@ def cmd_ask(
         RLS is enforced on every executed query.
       - When the Semantic Layer artifact exists at `.artifacts/semantic_layer.json`,
         loads it and passes it to the pipeline so the prompt includes metrics.
+
+    v2.1 (feature 004-metabase-integration):
+      - When `metabase_enabled=True` and Metabase is reachable, wires a
+        `on_query_complete` callback that calls MetabaseClient.send_governed_query
+        to create a card in the 'Chat Sessions' collection with the ALREADY-
+        GOVERNED SQL (Principle IV preserved by design). Best-effort: failures
+        are logged as warnings and do NOT break the pipeline (FR-013).
+      - `--no-metabase` flag disables this integration (SC-006).
+      - `--session <id>` routes the generated card into a 'Session: <id>'
+        dashboard within the 'Chat Sessions' collection (US3).
     """
     from src.ai_engineering.llm_client import LlmClient
     from src.ai_engineering.pipeline import TextToSqlPipeline
@@ -507,6 +527,45 @@ def cmd_ask(
 
     llm_client = LlmClient(llm_config)
 
+    # --- v2.1: optional MetabaseClient (best-effort integration) ---
+    metabase_client = None
+    if metabase_enabled:
+        try:
+            from src.ai_engineering.metabase_client import MetabaseClient
+            from src.contracts.metabase import MetabaseConfig
+
+            mb_config = MetabaseConfig.from_env()
+            metabase_client = MetabaseClient(mb_config)
+            # Verify Metabase is reachable (best-effort probe).
+            metabase_client.get_health()
+        except Exception as exc:
+            _info(
+                f"Metabase integration disabled (best-effort): {exc}"
+            )
+            metabase_client = None
+
+    # Build the on_query_complete callback (or None if Metabase is disabled).
+    metabase_state = _load_metabase_state() if metabase_client is not None else None
+    collection_id = metabase_state.collection_id if metabase_state is not None else None
+    db_id = metabase_state.metabase_db_id if metabase_state is not None else 1
+
+    def on_query_complete(response: object, viewer_arg: object) -> None:
+        # The callback is invoked by the pipeline at the end of a successful run.
+        # Best-effort: never raises (errors are logged inside send_governed_query).
+        if metabase_client is None:
+            return
+        # Cast viewer to its real type for the type checker.
+        v = viewer_arg if isinstance(viewer_arg, SemanticViewer) else None
+        card = metabase_client.send_governed_query(
+            response=response,  # type: ignore[arg-type]
+            viewer=v,
+            session_id=session_id,
+            collection_id=collection_id,
+            db_id=db_id,
+        )
+        if card is not None:
+            _info(f"Metabase card created: id={card.id} name={card.name!r}")
+
     # --- Run the pipeline with a GovernedQueryProvider (RLS enforced) ---
     with PostgresRepository(config=config) as repo:
         query_provider = build_governed_provider(
@@ -523,6 +582,7 @@ def cmd_ask(
             llm_config=llm_config,
             semantic_layer=semantic_doc,
             viewer=viewer,
+            on_query_complete=on_query_complete,
         )
         response = pipeline.run(NLQuestion(text=question))
 
@@ -621,6 +681,275 @@ def cmd_generate_semantic_layer() -> None:
     print(f"  JSON deterministic: True (no generated_at field in JSON)")
 
 
+# ---------------------------------------------------------------------------
+# v2.1 Metabase integration (feature 004)
+# ---------------------------------------------------------------------------
+
+_METABASE_STATE_PATH = _REPO_ROOT / ".artifacts" / "metabase_state.json"
+
+
+def _wait_for_metabase_health(timeout_s: int = 120) -> bool:
+    """Poll `GET /api/health` until 200 OK or timeout. Returns True on ready."""
+    import urllib.request
+
+    deadline = time.time() + timeout_s
+    url = f"{os.environ.get('METABASE_HOST', 'http://localhost:3000')}/api/health"
+    while time.time() < deadline:
+        try:
+            with urllib.request.urlopen(url, timeout=5) as _:
+                return True
+        except Exception:
+            time.sleep(2)
+    return False
+
+
+def _compose_metabase(action_args: list[str]) -> None:
+    """Run `docker compose -f <compose> <action_args...> metabase`.
+
+    The action args are a separate list so that "up -d" is passed as two args
+    (["up", "-d"]) rather than a single concatenated token.
+    """
+    cmd = ["docker", "compose", "-f", str(_COMPOSE_FILE), *action_args, "metabase"]
+    subprocess.run(cmd, check=True)
+
+
+def _save_metabase_state(state: MetabaseSession) -> None:
+    """Persist the MetabaseSession to .artifacts/metabase_state.json."""
+    _METABASE_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    _METABASE_STATE_PATH.write_text(
+        state.model_dump_json(indent=2), encoding="utf-8"
+    )
+
+
+def _load_metabase_state() -> MetabaseSession | None:
+    """Load the persisted MetabaseSession, or None if not yet set up."""
+    if not _METABASE_STATE_PATH.exists():
+        return None
+    from src.contracts.metabase import MetabaseSession
+
+    try:
+        return MetabaseSession.model_validate_json(
+            _METABASE_STATE_PATH.read_text(encoding="utf-8")
+        )
+    except Exception:
+        return None
+
+
+def cmd_metabase_setup() -> None:
+    """metabase setup: bring up the Metabase container + automate the initial setup.
+
+    Idempotent: if Metabase is already configured (setup-token is null),
+    skips admin user creation. Persists state to .artifacts/metabase_state.json
+    for use by subsequent commands.
+
+    Requires Docker, the warehouse (PostgreSQL) running, and METABASE_*
+    env vars.
+    """
+    from src.ai_engineering.metabase_client import MetabaseClient
+    from src.contracts.metabase import MetabaseConfig, MetabaseSession
+    from src.data_access.adapters.postgres.roles import (
+        ensure_metabase_readonly_role,
+    )
+
+    if not _docker_available():
+        _err("Docker is not running. Run `bootstrap` first to start the warehouse.")
+
+    # 1. Bring up the Metabase container.
+    _info("Starting Metabase container (this may take a minute on first pull)...")
+    try:
+        _compose_metabase(["up", "-d"])
+    except subprocess.CalledProcessError as exc:
+        _err(
+            f"docker compose up failed for metabase: "
+            f"{exc.stderr if exc.stderr else exc}"
+        )
+
+    # 2. Wait for healthcheck.
+    _info("Waiting for Metabase healthcheck...")
+    if not _wait_for_metabase_health():
+        _err("Metabase did not become healthy within the timeout.")
+
+    # 3. Load config (env vars).
+    try:
+        mb_config = MetabaseConfig.from_env()
+    except ValueError as exc:
+        _err(str(exc))
+
+    client = MetabaseClient(mb_config)
+
+    # 4. Create the metabase_readonly PG role (defense-in-depth; Principle IV).
+    _info("Ensuring metabase_readonly PG role with SELECT grants...")
+    config = PostgresConfig.from_env()
+    try:
+        with PostgresRepository(config=config) as repo:
+            ensure_metabase_readonly_role(
+                repo._conn, mb_config.admin_password
+            )
+    except Exception as exc:
+        _err(f"Failed to create metabase_readonly role: {exc}")
+
+    # 5. Auto-setup admin user (idempotent via is_setup_complete check).
+    _info("Checking Metabase setup status...")
+    if client.is_setup_complete():
+        _info("  Metabase already configured (admin user present); skipping setup_initial().")
+    else:
+        _info("  Running setup_initial() to create the admin user...")
+        client.setup_initial(mb_config.admin_email, mb_config.admin_password)
+
+    # 6. Create the database connection to PostgreSQL (metabase_readonly role).
+    _info("Creating Metabase → PostgreSQL database connection...")
+    db_id = client.create_db_connection(
+        pg_host=os.environ.get("POSTGRES_HOST", "localhost"),
+        pg_port=int(os.environ.get("POSTGRES_PORT", "5432")),
+        pg_database=os.environ.get("POSTGRES_DB", "global_superstore"),
+        pg_user="metabase_readonly",
+        pg_password=mb_config.admin_password,  # reuse local-only password
+        db_name=mb_config.db_name,
+    )
+    if db_id is None:
+        _err("Failed to create Metabase database connection.")
+
+    # 7. Create the "Chat Sessions" collection.
+    _info('Creating Metabase "Chat Sessions" collection...')
+    collection = client.get_or_create_collection(mb_config.collection_name)
+    if collection is None:
+        _err('Failed to create Metabase collection "Chat Sessions".')
+
+    # 8. Persist state.
+    version = client.get_version()
+    state = MetabaseSession(
+        configured_at=datetime.now(timezone.utc),
+        admin_email=mb_config.admin_email,
+        metabase_db_id=db_id or 0,
+        collection_id=collection.id if collection else 0,
+        metabase_version=version,
+    )
+    _save_metabase_state(state)
+
+    # 9. Print summary.
+    _info("Metabase setup complete.")
+    print("")
+    print("Metabase summary")
+    print(f"  URL              : {mb_config.host}")
+    print(f"  Admin email      : {mb_config.admin_email}")
+    print(f"  Metabase version : {version}")
+    print(f"  DB connection id : {state.metabase_db_id} (PostgreSQL via metabase_readonly)")
+    print(f"  Collection id    : {state.collection_id} ({mb_config.collection_name!r})")
+    print(f"  State persisted  : {_METABASE_STATE_PATH}")
+    print("")
+    print(f"Open {mb_config.host} and login with the admin credentials.")
+
+
+def cmd_metabase_status() -> None:
+    """metabase status: print a readable summary of the Metabase instance."""
+    from src.ai_engineering.metabase_client import MetabaseClient
+    from src.contracts.metabase import MetabaseConfig
+
+    try:
+        mb_config = MetabaseConfig.from_env()
+    except ValueError as exc:
+        _err(str(exc))
+    client = MetabaseClient(mb_config)
+
+    health = client.get_health()
+    version = client.get_version()
+    state = _load_metabase_state()
+    cards_count: int = 0
+    if state is not None:
+        cards = client.list_cards_in_collection(state.collection_id)
+        cards_count = len(cards)
+
+    print("Metabase status")
+    print(f"  URL              : {mb_config.host}")
+    print(f"  Version          : {version}")
+    print(f"  Health           : {health}")
+    print(f"  Admin email      : {state.admin_email if state else 'not set up'}")
+    print(f"  DB connection id : {state.metabase_db_id if state else 'n/a'}")
+    print(f"  Collection id    : {state.collection_id if state else 'n/a'}")
+    print(f"  Cards in 'Chat Sessions': {cards_count}")
+
+
+def cmd_metabase_teardown(remove_volume: bool = False) -> None:
+    """metabase teardown: stop and remove the Metabase container (+ optional volume)."""
+    if not _docker_available():
+        _err("Docker is not running; nothing to tear down for Metabase.")
+
+    _info("Stopping Metabase container...")
+    try:
+        _compose_metabase(["stop"])
+        _compose_metabase(["rm", "-f"])
+    except subprocess.CalledProcessError as exc:
+        _err(f"Metabase teardown failed: {exc}")
+
+    if remove_volume:
+        result = subprocess.run(
+            ["docker", "volume", "rm", "plataforma_metabase_data"],
+            capture_output=True, text=True, check=False,
+        )
+        if result.returncode != 0:
+            _info(f"Note: could not remove volume (may already be gone): {result.stderr.strip()}")
+
+    _info("Metabase teardown complete. PG warehouse remains running.")
+
+
+def cmd_metabase_reset_cards() -> None:
+    """metabase reset-cards: delete every card in the 'Chat Sessions' collection."""
+    from src.ai_engineering.metabase_client import MetabaseClient
+    from src.contracts.metabase import MetabaseConfig
+
+    state = _load_metabase_state()
+    if state is None:
+        _err("Metabase state not found; run `metabase setup` first.")
+
+    try:
+        mb_config = MetabaseConfig.from_env()
+    except ValueError as exc:
+        _err(str(exc))
+    client = MetabaseClient(mb_config)
+
+    cards = client.list_cards_in_collection(state.collection_id)
+    if not cards:
+        _info("No cards to delete in 'Chat Sessions' collection.")
+        return
+
+    deleted = 0
+    for card in cards:
+        if client.delete_card(card.id):
+            deleted += 1
+
+    _info(f"Deleted {deleted}/{len(cards)} cards from 'Chat Sessions' (admin user + DB connection intact).")
+
+
+def cmd_metabase_cards() -> None:
+    """metabase cards: list all cards in the 'Chat Sessions' collection."""
+    from src.ai_engineering.metabase_client import MetabaseClient
+    from src.contracts.metabase import MetabaseConfig
+
+    state = _load_metabase_state()
+    if state is None:
+        _err("Metabase state not found; run `metabase setup` first.")
+
+    try:
+        mb_config = MetabaseConfig.from_env()
+    except ValueError as exc:
+        _err(str(exc))
+    client = MetabaseClient(mb_config)
+
+    cards = client.list_cards_in_collection(state.collection_id)
+    if not cards:
+        print("No cards found in 'Chat Sessions' collection.")
+        return
+
+    print(f"Cards in 'Chat Sessions' (collection_id={state.collection_id}):")
+    for card in cards:
+        desc = card.description or ""
+        # Extract viewer_id from description if present
+        viewer_id = "unknown"
+        if "viewer_id=" in desc:
+            viewer_id = desc.split("viewer_id=")[1].split()[0]
+        print(f"  id={card.id:>4}  name={card.name!r}  display={card.display}  viewer={viewer_id}")
+
+
 def cmd_evaluate() -> None:
     """evaluate: run the sanity-check evaluation (v1.1).
 
@@ -692,6 +1021,7 @@ _COMMANDS = {
     "validate": cmd_validate,
     "generate-dictionary": None,  # has special arg handling in main()
     "generate-semantic-layer": None,  # v2.0 — has special arg handling in main()
+    "metabase": None,  # v2.1 — subcommands dispatched in main()
     "ask": None,  # has special arg handling in main()
     "evaluate": None,  # has special arg handling in main()
 }
@@ -708,10 +1038,13 @@ def main(argv: list[str] | None = None) -> None:
         print("  validate                          Single pass/fail health check")
         print("  generate-dictionary [--source P]  Generate data_dictionary.md from the schema")
         print("  generate-semantic-layer            Generate .artifacts/semantic_layer.{json,md}")
-        print("  ask <question> [--viewer <id>]     Translate a natural-language question to SQL")
+        print("  metabase <setup|...>                v2.1 Metabase integration (`metabase setup` to bootstrap)")
+        print("  ask <question> [--viewer <id>] [--no-metabase] [--session <id>]")
+        print("                                      Translate a natural-language question to SQL")
         print("                                      (--viewer <id> resolves a person from the")
         print("                                       People table, or a custom viewer from")
-        print("                                       viewers.yaml)")
+        print("                                       viewers.yaml; --no-metabase skips Metabase;")
+        print("                                       --session <id> groups cards under a dashboard)")
         print("  evaluate                           Run sanity-check evaluation (v1.1)")
         sys.exit(0 if args else 1)
 
@@ -727,11 +1060,42 @@ def main(argv: list[str] | None = None) -> None:
     if command == "generate-semantic-layer":
         cmd_generate_semantic_layer()
         return
+    if command == "metabase":
+        # Subcommands: setup | status | teardown | reset-cards.
+        # T011 US1: metabase setup. T029-T031 US4: the others.
+        if not rest:
+            _err("Usage: python -m src.cli.main metabase <setup|status|teardown|reset-cards|cards>")
+        sub = rest[0]
+        sub_rest = rest[1:]
+        # T011 / T012-T014 (US1)
+        if sub == "setup":
+            cmd_metabase_setup()
+            return
+        # The rest are implemented in Phase 6 (US4); fail-fast until then.
+        if sub in {"status", "teardown", "reset-cards"}:
+            if sub == "status":
+                cmd_metabase_status()
+                return
+            if sub == "teardown":
+                remove_vol = "--remove-volume" in sub_rest
+                cmd_metabase_teardown(remove_volume=remove_vol)
+                return
+            if sub == "reset-cards":
+                cmd_metabase_reset_cards()
+                return
+        if sub == "cards":
+            cmd_metabase_cards()
+            return
+        _err(f"Unknown metabase subcommand: {sub!r}. Use setup|status|teardown|reset-cards|cards.")
+        return
     if command == "ask":
-        # Parse v2.0 flags: --viewer <id> and --allow-full-access.
+        # Parse v2.0/v2.1 flags: --viewer <id>, --allow-full-access,
+        # --no-metabase, --session <id>.
         # Any remaining non-flag token is part of the question (joined).
         viewer_id: str | None = None
         allow_full = False
+        metabase_enabled = True
+        session_id: str | None = None
         question_tokens: list[str] = []
         i = 0
         while i < len(rest):
@@ -744,12 +1108,26 @@ def main(argv: list[str] | None = None) -> None:
                 allow_full = True
                 i += 1
                 continue
+            if tok == "--no-metabase":
+                metabase_enabled = False
+                i += 1
+                continue
+            if tok == "--session" and i + 1 < len(rest):
+                session_id = rest[i + 1]
+                i += 2
+                continue
             question_tokens.append(tok)
             i += 1
         if not question_tokens:
-            _err("Usage: python -m src.cli.main ask <question> [--viewer <id>]")
+            _err("Usage: python -m src.cli.main ask <question> [--viewer <id>] [--no-metabase] [--session <id>]")
         question_text = " ".join(question_tokens)
-        cmd_ask(question_text, viewer_id=viewer_id, allow_full_access=allow_full)
+        cmd_ask(
+            question_text,
+            viewer_id=viewer_id,
+            allow_full_access=allow_full,
+            metabase_enabled=metabase_enabled,
+            session_id=session_id,
+        )
         return
     if command == "evaluate":
         cmd_evaluate()

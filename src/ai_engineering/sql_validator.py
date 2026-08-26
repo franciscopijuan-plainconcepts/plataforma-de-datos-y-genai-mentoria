@@ -182,6 +182,18 @@ def validate_sql(sql: str, table_def: TableDef) -> ValidationResult:
         #       net-sales-style metrics). Add the keyword so the column
         #       whitelist does not reject it as a non-existent column.
         "exists",
+        # PostgreSQL date/time functions that the LLM may generate:
+        "to_char", "to_date", "to_timestamp", "to_number",
+        "date_trunc", "date_part", "date_add", "date_sub",
+        "make_date", "make_interval", "age", "interval",
+        "current_date", "current_timestamp", "current_time",
+        "trunc", "round", "ceil", "floor", "abs", "sqrt", "power",
+        "lower", "upper", "length", "substring", "substr", "trim",
+        "concat", "replace", "position", "left", "right",
+        "greatest", "least", "nullif", "greatest", "least",
+        "string_agg", "array_agg", "bool_or", "bool_and",
+        "stddev", "variance", "median", "percentile_cont", "percentile_disc",
+        "row_number", "rank", "dense_rank", "over", "partition",
     }
     identifiers = _extract_identifiers(normalized)
     for ident in identifiers:

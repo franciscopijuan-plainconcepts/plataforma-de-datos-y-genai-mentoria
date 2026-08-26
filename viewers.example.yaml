@@ -1,23 +1,37 @@
-# viewers.example.yaml — Semantic Layer viewer configuration template.
+# viewers.example.yaml — Fallback viewer configuration for escape hatches.
 #
-# DEFAULT BEHAVIOR: `ask --viewer <id>` resolves a real person from the
-# `People` table (the canonical governance mapping) and uses that person's
-# region. You do NOT need to maintain a YAML entry per person — the system
-# reads the People table directly to log the user in:
+# HOW VIEWERS WORK IN THIS PROJECT:
 #
-#     uv run python -m src.cli.main ask --viewer marilene_rousseau "total sales"
-#     uv run python -m src.cli.main ask --viewer "Marilène Rousseau" "total sales"
-#     uv run python -m src.cli.main ask --viewer "Marilene Rousseau" "total sales"
+# By default, `ask --viewer <id>` resolves a REAL PERSON from the `People`
+# table (the canonical governance mapping per constitution Principle IV).
+# The People table has 24 rows, each mapping a person to a single region:
 #
-# This file is the FALLBACK for viewers that don't correspond to a real
-# person in People (e.g., escape hatches, role-based access, CI service
-# accounts). When `--viewer <id>` does not match any row in People, the
-# system looks for `<id>` in this file.
+#   Person                    -> Region
+#   Marilène Rousseau         -> Caribbean
+#   Nicodemo Bautista         -> Central America
+#   Lon Bonher                -> Central US
+#   Derrick Snyders           -> Western US
+#   Flannery Newton           -> Southern US
+#   Andile Ihejirika          -> Central Africa
+#   ... (24 people total — see `data_dictionary.md` People table)
+#
+# You do NOT need to list people in this file. The system reads People
+# directly. For example:
+#
+#   uv run python -m src.cli.main ask --viewer marilene_rousseau "total sales"
+#   uv run python -m src.cli.main ask --viewer "Marilène Rousseau" "total sales"
+#   uv run python -m src.cli.main ask --viewer "Marilene Rousseau" "total sales"
+#
+# All three resolve to the same person (Caribbean region).
+#
+# THIS FILE IS ONLY FOR FALLBACK VIEWERS:
+#
+# Use this file for viewers that do NOT correspond to a real person in the
+# People table — e.g., escape hatches, CI service accounts, or role-based
+# viewers that span multiple regions for operational purposes.
 #
 # Copy this file to `viewers.yaml` (gitignored — local only) and edit:
 #     cp viewers.example.yaml viewers.yaml
-#
-# Or point SEMANTIC_VIEWERS_FILE at an alternative path.
 #
 # Each viewer entry:
 #   id                  : viewer identifier (snake_case; used by `ask --viewer <id>`)
@@ -26,36 +40,17 @@
 #   allows_full_access   : if true, the resolver skips RLS filtering. ONLY effective
 #                         when ENV in {local, dev, test}; otherwise it is ignored
 #                         (forced to false) — governance is non-negotiable.
-#
-# The set of valid region values is the unique set of `Orders."Region"` values
-# (23 unique, see `data_dictionary.md`):
-# Africa, ASEAN, Atlantic, Australia and Oceania, Canada, Caribbean,
-# Central Africa, Central America, Central Asia, Central US, Eastern Africa,
-# Eastern Asia, Eastern Europe, Eastern US, Europe, North Africa, North Asia,
-# Northern Europe, Oceania, South America, Southeastern Asia, Southern Africa,
-# Southern Asia, Southern Europe, Western Africa, Western Asia, Western Europe,
-# Western US.
 
 viewers:
-  - id: alice
-    regions:
-      - Caribbean
-      - Central America
-    allows_full_access: false
-
-  - id: bob
-    regions:
-      - Central US
-      - Western US
-    allows_full_access: false
-
-  - id: caribbean_only
-    regions:
-      - Caribbean
-    allows_full_access: false
-
-  # Local-dev escape hatch. Only honored when ENV in {local, dev, test}.
+  # Local-dev escape hatch: no RLS filtering. ONLY honored when ENV=local/dev/test.
   # In any other environment, allows_full_access is forced to false by the registry.
   - id: admin_dev
     regions: []
     allows_full_access: true
+
+  # CI smoke-test account: no access to any region (0 rows for every query).
+  # Useful for CI pipelines that only verify the pipeline runs without errors,
+  # without needing to assert specific data values.
+  - id: ci_smoke_test
+    regions: []
+    allows_full_access: false

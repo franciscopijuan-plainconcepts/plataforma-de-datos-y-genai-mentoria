@@ -4,9 +4,9 @@ Documento vivo para seguimiento del estado actual, decisiones clave, riesgos y s
 
 ## Estado actual (snapshot)
 
-- Fecha de actualizacion: 2026-08-17
-- Branch principal: main (feature en `003-semantic-layer-v1`)
-- Estado global: v2.0 Semantic Layer + Governance implementado y validado
+- Fecha de actualizacion: 2026-08-24
+- Branch principal: main (feature `004-metabase-integration` mergeada)
+- Estado global: v2.1 Metabase integration implementado y validado
 - Ambito completado:
   - Warehouse local PostgreSQL en Docker (v0 baseline)
   - Ingestion desde Global Superstore Data.xlsx (v0)
@@ -24,8 +24,17 @@ Documento vivo para seguimiento del estado actual, decisiones clave, riesgos y s
   - **Prompt enrichment**: `PromptBuilder` ahora incluye bloque condensado de métricas/dimensiones/joins cuando el Semantic Layer está cargado (v2.0)
   - Nuevos comandos CLI v2.0: `generate-semantic-layer`, `ask --viewer <id>` (v2.0)
   - Logging extendido con `viewer_id`, `regions`, `gov_bypass` flag en `.artifacts/text_to_sql.log` (v2.0, FR-021)
-  - Subpaquete nuevo `src/data_engineering/semantic_layer/` con builder, resolver, governed_provider, registry, metrics, render (v2.0)
+  - Subpaquete nuevo `src/data_engineering/semantic_layer/` con builder, resolver, governed_provider, registry, metrics, render, person_resolver (v2.0)
   - Contratos nuevos en `src/contracts/semantic_layer.py` (Pydantic v2 frozen) (v2.0)
+  - **Metabase Integration v2.1**: servicio de Metabase local en Docker que visualiza como cards/dashboards las consultas SQL gobernadas generadas por el pipeline (v2.1)
+  - **Governed SQL Cards**: al final de cada `ask --viewer <id>` exitoso, se crea automaticamente una card en Metabase con el SQL ya gobernado (v2.1)
+  - **Metabase bootstrap script**: `scripts/metabase_bootstrap.py` hace setup automatico (PG role + admin user + DB connection + colleccion + state) — idempotente (v2.1)
+  - **Login-as-person**: `PeopleViewerResolver` resuelve el viewer desde la tabla People directamente (snake_case ID, nombre con acentos, o sin acentos) — sin necesidad de viewers.yaml para personas reales (v2.1)
+  - **CLI**: `metabase setup|status|cards|teardown|reset-cards`; `ask --no-metabase`; `ask --session <id>` (v2.1)
+  - Modulos nuevos: `src/ai_engineering/metabase_client.py` (ONLY httpx import), `src/data_access/adapters/postgres/roles.py`, `src/contracts/metabase.py` (v2.1)
+  - `on_query_complete` callback en `TextToSqlPipeline` (generico; no acopla Metabase al pipeline core) (v2.1)
+  - `load_dotenv` con `override=True` en CLI — variables de .env siempre toman precedencia (v2.1)
+  - Fix: `SqlValidator` ahora acepta funciones PostgreSQL (to_char, date_trunc, round, etc.) (v2.1)
 
 ## Evidencias de completitud
 
@@ -125,6 +134,7 @@ La siguiente fase requiere definiciones de negocio mas estrictas para evitar SQL
 | M1 | v1.0 Text-to-SQL sobre Orders | Completado | - | 2026-08-11 | Pipeline NL→SQL→resultados tipados |
 | M2 | v1.1 Hardening + Evaluation | Completado | - | 2026-08-11 | Logging + sanity-check (~10 preguntas) |
 | M3 | v2.0 Semantic Layer + RLS Governance | Completado | - | 2026-08-17 | SemanticLayerDocument + GovernedQueryProvider (RLS enforced, Principle IV satisfied) |
+| M3.1 | v2.1 Metabase Integration | Completado | - | 2026-08-20 | Metabase + governed SQL cards + sessions + CLI ops + metabase_bootstrap.py |
 | M4 | v3.0 RBAC column-level + People.Region taxonomy + Audit | Pendiente | TBD | TBD | Resolución de mismatch Canada; auth real; audit persistente |
 
 ## Rutina de mantenimiento de este documento
