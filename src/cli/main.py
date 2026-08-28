@@ -207,6 +207,12 @@ def cmd_bootstrap(source_file: str | None = None) -> None:
     # that could mask data-quality issues.
     with PostgresRepository(config=config) as repo:
         load_results = load_workbook(src_path, repo, repo)
+        # Historic log of predict-sales calls (empty at bootstrap time —
+        # populated as predictions are made). Created up-front so it shows
+        # up in `validate`/`list_tables` immediately after bootstrap.
+        from src.mlops.predictions_store import ensure_predictions_table
+
+        ensure_predictions_table(repo)
 
     # --- Manifest provenance ---
     manifest = build_manifest(inference, load_results)
@@ -648,12 +654,25 @@ def cmd_predict_sales(environment: str, input_payload: dict[str, str]) -> None:
         _err(f"Invalid predict-sales input: {exc}")
 
     registry = ArtifactRegistry()
+    # Best-effort: persist the prediction into the `Predictions` SQL table
+    # when PostgreSQL is reachable. If it isn't (e.g. offline/unit-test
+    # usage), fall back to inference without SQL persistence — the JSONL
+    # append-log in src/mlops/inference.py still records the call either way.
+    repo: PostgresRepository | None
     try:
-        result = predict_sales(registry, cast("Any", environment), prediction_input)
+        repo = PostgresRepository(config=PostgresConfig.from_env())
+    except Exception:
+        repo = None
+
+    try:
+        result = predict_sales(registry, cast("Any", environment), prediction_input, repo)
     except (NoActiveModelError, RegistryError) as exc:
         _err(str(exc))
     except Exception as exc:
         _err(f"predict-sales failed: {exc}")
+    finally:
+        if repo is not None:
+            repo.close()
 
     print(f"Predicted Sales: {result.predicted_sales}")
     print(

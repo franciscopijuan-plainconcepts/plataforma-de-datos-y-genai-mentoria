@@ -61,7 +61,10 @@ A Data and GenAI Platform that connects Generative AI to a Data Warehouse.
   an explicit `--force` governance bypass recorded in the registry history.
 - `predict-sales` loads the promoted model for an environment, reuses the exact
   same feature derivation logic as training, logs latency/input/output, and
-  degrades gracefully on unseen categories (`used_fallback_encoding`).
+  degrades gracefully on unseen categories (`used_fallback_encoding`). Every
+  call also persists a historic row (prediction, timestamp, model/run used,
+  and all input parameters) into a `Predictions` SQL table, in addition to
+  the `.artifacts/mlops/predict_sales.log` JSONL log.
 
 ## Team Handoff Docs
 

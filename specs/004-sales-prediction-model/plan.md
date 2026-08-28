@@ -160,9 +160,14 @@ src/
 │   │                                   #   artifact), `registry.json` manifest read/write,
 │   │                                   #   promotion (dev/staging/prod gate + history), listing
 │   │                                   #   without deserializing the model.
-│   └── inference.py                    # Loads the promoted model for an environment and
-│                                       #   predicts `Sales` from a `PredictionInput`, reusing
-│                                       #   `features.py`; computes `used_fallback_encoding`.
+│   ├── inference.py                    # Loads the promoted model for an environment and
+│   │                                   #   predicts `Sales` from a `PredictionInput`, reusing
+│   │                                   #   `features.py`; computes `used_fallback_encoding`.
+│   │                                   #   (AMENDED 2026-08-26) also accepts an optional
+│   │                                   #   `predictions_repository` to persist history to SQL.
+│   └── predictions_store.py            # (NEW, Amendment 2026-08-26) `Predictions` TableDef +
+│                                       #   `PredictionRow` builder + persistence, via
+│                                       #   `SchemaProvider`/`DataProvider` (no psycopg import).
 └── cli/
     └── main.py                          # (MODIFIED) adds `train-sales-model`,
                                         #   `promote-sales-model`, `predict-sales` commands;
@@ -193,6 +198,13 @@ src/
 │               ├── metrics.json
 │               ├── data_hash.txt
 │               └── model.cbm           # serialized CatBoost native format
+
+# New PostgreSQL table (Amendment 2026-08-26) — NOT a filesystem artifact,
+# lives in the same Postgres warehouse as Orders/Returns/People, created
+# idempotently by `bootstrap` and by `predict-sales` itself:
+#   Predictions  # one row per `predict-sales` call: prediction_id (UUID4 PK),
+#                #   predicted_at, predicted_sales, run_id/model_name/environment,
+#                #   + every PredictionInput field used (data-model.md § 9).
 
 pyproject.toml                          # (MODIFIED) adds `scikit-learn>=1.9`,
                                         #   `catboost>=1.2.10` to `[project.dependencies]`

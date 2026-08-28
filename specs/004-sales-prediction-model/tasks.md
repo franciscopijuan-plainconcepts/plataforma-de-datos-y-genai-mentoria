@@ -211,6 +211,24 @@ graph TD
 > full test suite (160 passed) and `mypy --strict` were re-verified green
 > after the change.
 
+> **Amendment (2026-08-26)**: After US4 (inference) was completed and
+> validated, FR-025a was added: `predict-sales` now also persists each
+> prediction (predicted `Sales`, date/hour predicted, `run_id`/model/
+> environment, and every input parameter) as a row in a new `Predictions`
+> SQL table, created idempotently by `bootstrap` and by `predict-sales`
+> itself via the existing `SchemaProvider`/`DataProvider` Protocols — in
+> addition to, not instead of, the pre-existing `predict_sales.log` JSONL
+> log. This touched `src/contracts/data_access.py` (new `PredictionRow` in
+> the `Row` union), a new `src/mlops/predictions_store.py` module,
+> `src/mlops/inference.py` (new optional `predictions_repository` param),
+> and `src/cli/main.py` (`bootstrap` creates the table; `cmd_predict_sales`
+> passes a best-effort `PostgresRepository`). No new task IDs were added
+> here since this was a follow-up enhancement, not a re-run of planning;
+> see `spec.md` § Amendment (2026-08-26) and `data-model.md` § 9 for the
+> full contract. Verified: `mypy --strict` clean, full unit+contract suite
+> (152 tests) green, and manually exercised end-to-end against the live
+> Postgres container.
+
 ## Done When
 
 - [ ] `tasks.md` generated with all phases, task IDs, `[P]` markers, exact file paths, and user-story grouping

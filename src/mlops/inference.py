@@ -15,6 +15,7 @@ from src.contracts.mlops import EnvironmentName, PredictionInput, PredictionResu
 from src.mlops.catboost_model import build_catboost_feature_matrix
 from src.mlops.features import CATEGORICAL_FIELDS, derive_prediction_row
 from src.mlops.linear_model import build_linear_feature_matrix
+from src.mlops.predictions_store import PredictionsRepository, persist_prediction
 from src.mlops.registry import ArtifactRegistry, NoActiveModelError
 
 
@@ -25,8 +26,15 @@ def predict_sales(
     registry: ArtifactRegistry,
     environment: EnvironmentName,
     prediction_input: PredictionInput,
+    predictions_repository: PredictionsRepository | None = None,
 ) -> PredictionResult:
-    """Load the promoted model for an environment and predict sales."""
+    """Load the promoted model for an environment and predict sales.
+
+    When `predictions_repository` is provided (e.g. a `PostgresRepository`),
+    the prediction is also persisted as a historic row in the `Predictions`
+    SQL table (predicted sales, the date/hour of the prediction, and every
+    input parameter used) — in addition to the JSONL append-log below.
+    """
     started_at = time.perf_counter()
     active_entry = registry.resolve_active_run(environment)
     if active_entry is None:
@@ -46,6 +54,8 @@ def predict_sales(
         latency_ms=latency_ms,
     )
     _log_prediction_call(prediction_input, result)
+    if predictions_repository is not None:
+        persist_prediction(predictions_repository, prediction_input, result)
     return result
 
 

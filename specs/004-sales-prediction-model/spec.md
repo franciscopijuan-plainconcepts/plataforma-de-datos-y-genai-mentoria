@@ -44,6 +44,22 @@ The final feature set is: temporal features derived from `Order Date`,
 reflect this; `src/mlops/features.py` carries the same rationale as a
 module docstring.
 
+## Amendment (2026-08-26): Persist prediction history to a SQL `Predictions` table
+
+Added FR-025a: in addition to the `.artifacts/mlops/predict_sales.log` JSONL
+append-log (FR-025, unchanged), every `predict-sales` call now also inserts
+one row into a `Predictions` SQL table — the predicted `Sales` value, the
+date/hour the prediction was made, the `run_id`/`model_name`/`environment`
+that served it, and every input parameter used to predict. This makes the
+prediction history queryable (e.g. `SELECT * FROM "Predictions"`) instead of
+only inspectable via the log file. New module `src/mlops/predictions_store.py`
+builds the table definition and row, and persists through the existing
+engine-neutral `SchemaProvider`/`DataProvider` Protocols — no new coupling to
+Postgres internals inside `src/mlops/` (FR-026 unaffected). The `bootstrap`
+CLI command now also creates the (initially empty) `Predictions` table
+alongside `Orders`/`Returns`/`People`. See `data-model.md` § 9 and
+`contracts/mlops_inference.md` for the full contract.
+
 ## Scope Summary
 
 Esta especificación define el milestone **v3.0 (MLOps)** de la Plataforma de Datos y GenAI: la primera capacidad del dominio **MLOps** (constitución, Principle II), separado e independiente de Data Engineering (`001-data-genai-platform-baseline`) y AI Engineering (`002-text-to-sql-v1`, `003-semantic-layer-v1`).
@@ -223,6 +239,7 @@ Un usuario (analista, otro sistema, o el propio MLOps Engineer validando el mode
 - **FR-023**: `predict-sales` MUST reutilizar el mismo código de derivación de features que el entrenamiento (FR-002/FR-003) — no una reimplementación paralela — para evitar train/serve skew.
 - **FR-024**: Ante un valor categórico no visto en entrenamiento, `predict-sales` MUST NOT lanzar una excepción no controlada; MUST aplicar la estrategia de fallback definida en el pipeline (FR-007/FR-008) y señalizarlo en la respuesta.
 - **FR-025**: Cada invocación de `predict-sales` MUST loguear (sujeto a las reglas de gobernanza de datos existentes) el input, la predicción, el `run_id`/modelo usado, y la latencia — sentando la base para observabilidad de producción exigida por Principle V.
+- **FR-025a** *(Amendment 2026-08-26)*: Además del log JSONL de FR-025, cada invocación de `predict-sales` MUST persistir la misma información (predicción, fecha/hora de la predicción, `run_id`/modelo/ambiente, y todos los parámetros de input usados) como una fila en una tabla SQL `Predictions`, creada de forma idempotente (`CREATE TABLE IF NOT EXISTS`) vía los Protocols engine-neutral existentes (`SchemaProvider`/`DataProvider`, `src/data_access/interfaces.py`) — sin acoplar `src/mlops/` a `psycopg` (FR-026 sigue aplicando). Esta persistencia es best-effort: si Postgres no está disponible, `predict-sales` MUST seguir funcionando (solo con el log JSONL), preservando la garantía de FR-021/US4 de que la inferencia no depende de una conexión a base de datos activa.
 
 #### Domain Isolation & Typing (Principle I & II)
 

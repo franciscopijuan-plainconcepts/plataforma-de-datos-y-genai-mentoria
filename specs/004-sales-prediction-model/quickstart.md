@@ -181,6 +181,12 @@ latency_ms: <value < 2000>
 - `predicted_sales` es un número (no una excepción).
 - `latency_ms < 2000` (SC-006).
 - La invocación queda logueada en `.artifacts/mlops/predict_sales.log` (verificar con `tail -n 5 .artifacts/mlops/predict_sales.log`).
+- **(Amendment 2026-08-26)** La invocación además queda persistida como una fila nueva en la tabla SQL `Predictions` (creada por `bootstrap`, idempotente si no existía). Verificar:
+  ```bash
+  docker exec plataforma_postgres psql -U postgres -d superstore \
+    -c 'SELECT * FROM "Predictions" ORDER BY "Predicted At" DESC LIMIT 5;'
+  ```
+  Si Postgres no está disponible, `predict-sales` sigue funcionando (solo con el log JSONL) — la persistencia SQL es best-effort.
 
 ### Scenario 4b — Categoría no vista en entrenamiento (US4 AC3)
 

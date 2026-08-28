@@ -63,7 +63,7 @@ Documento vivo para seguimiento del estado actual, decisiones clave, riesgos y s
 - Artifact registry local `.artifacts/mlops/` con `registry.json`, `params.json`, `metrics.json`, `data_hash.txt`, `model.joblib`/`model.cbm`.
 - Reproducibilidad verificada: mismo `data_hash` + mismos hiperparámetros ⇒ mismas métricas.
 - `promote-sales-model`: staged promotion `dev/staging/prod`, rechazo de direct-to-prod salvo `--force`, historial completo preservado.
-- `predict-sales`: inferencia sobre modelo promovido, fallback explícito para categorías no vistas, logging en `.artifacts/mlops/predict_sales.log`.
+- `predict-sales`: inferencia sobre modelo promovido, fallback explícito para categorías no vistas, logging en `.artifacts/mlops/predict_sales.log`. *(Amendment 2026-08-26)* además persiste cada predicción (valor predicho, fecha/hora, run_id/modelo/ambiente y todos los parámetros de input) como fila en una nueva tabla SQL `Predictions` (creada por `bootstrap`).
 
 ## Calidad tecnica actual
 

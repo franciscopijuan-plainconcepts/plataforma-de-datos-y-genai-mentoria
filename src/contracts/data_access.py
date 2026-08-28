@@ -24,7 +24,7 @@ from pydantic import BaseModel, ConfigDict, Field
 # A Row is any of the typed per-table row models. This union is the input
 # type for `DataProvider.load_rows` so a single semantic bulk-load method
 # can accept any table's rows without leaking engine-specific concerns.
-Row = Union["OrderRow", "ReturnRow", "PersonRow"]
+Row = Union["OrderRow", "ReturnRow", "PersonRow", "PredictionRow"]
 
 
 class LogicalType(str, Enum):
@@ -169,3 +169,37 @@ class PersonRow(BaseModel):
 
     person: str = Field(validation_alias="Person")  # PK; normalized (non-breaking spaces stripped) at load
     region: str = Field(validation_alias="Region")  # future v2.0 RLS anchor
+
+
+class PredictionRow(BaseModel):
+    """One row of the `Predictions` table (historic log of predict-sales calls).
+
+    Every call to `predict-sales` inserts one row: the predicted `Sales`
+    value, the date/hour the prediction was made (`predicted_at`), which
+    promoted model run served it, and every parameter that was used as
+    input to the model (mirrors `PredictionInput` in `src/contracts/mlops.py`).
+    `prediction_id` is a surrogate UUID4 assigned at insert time (no natural
+    key exists for a prediction event).
+    """
+
+    model_config = ConfigDict(frozen=True, populate_by_name=True)
+
+    prediction_id: str = Field(validation_alias="Prediction ID")
+    predicted_at: datetime = Field(validation_alias="Predicted At")  # date + hour the prediction was made
+    predicted_sales: Decimal = Field(validation_alias="Predicted Sales")
+    run_id: str = Field(validation_alias="Run ID")
+    model_name: str = Field(validation_alias="Model Name")
+    environment: str = Field(validation_alias="Environment")
+    # --- input parameters used to produce the prediction ---
+    order_date: datetime = Field(validation_alias="Order Date")
+    ship_mode: str = Field(validation_alias="Ship Mode")
+    segment: str = Field(validation_alias="Segment")
+    region: str = Field(validation_alias="Region")
+    market: str = Field(validation_alias="Market")
+    product_id: str = Field(validation_alias="Product ID")
+    sub_category: str = Field(validation_alias="Sub-Category")
+    category: str = Field(validation_alias="Category")
+    quantity: int = Field(validation_alias="Quantity")
+    discount: Decimal = Field(validation_alias="Discount")
+    used_fallback_encoding: bool = Field(validation_alias="Used Fallback Encoding")
+    latency_ms: int = Field(validation_alias="Latency Ms")

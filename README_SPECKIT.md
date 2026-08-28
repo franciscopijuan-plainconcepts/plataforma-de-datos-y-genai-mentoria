@@ -16,7 +16,7 @@ Se ejecutaron cuatro features completas con Spec Kit:
 1. **Feature 001 (`data-genai-platform-baseline`)** — v0 baseline: PostgreSQL en Docker, data dictionary, CLI bootstrap/teardown/validate/generate-dictionary, contratos tipados, tests de contrato e integracion.
 2. **Feature 002 (`text-to-sql-v1`)** — v1.0/v1.1: pipeline NL→SQL sobre Orders via Forge proxy, `ask` + `evaluate` CLI, logging estructurado, sanity-check de ~10 preguntas.
 3. **Feature 003 (`semantic-layer-v1`)** — v2.0: Semantic Layer con métricas/dimensiones/relaciones + RLS por `Region` usando `People`. Satisface constitution Principle IV por primera vez.
-4. **Feature 004 (`sales-prediction-model`)** — v3.0: dominio `src/mlops/` aislado con `train-sales-model`, artifact registry `.artifacts/mlops/registry.json`, staged promotion (`promote-sales-model`) e inferencia (`predict-sales`).
+4. **Feature 004 (`sales-prediction-model`)** — v3.0: dominio `src/mlops/` aislado con `train-sales-model`, artifact registry `.artifacts/mlops/registry.json`, staged promotion (`promote-sales-model`) e inferencia (`predict-sales`), con historial de predicciones persistido en una tabla SQL `Predictions` (Amendment 2026-08-26).
 
 Cada feature siguio el flujo completo: constitution (solo 001), spec, plan + research + data-model + contracts + quickstart, tasks, implement por fases, validacion. La feature 003 introdujo:
 - `src/data_engineering/semantic_layer/` subpaquete (builder, resolver, governed_provider, registry, metrics, render).

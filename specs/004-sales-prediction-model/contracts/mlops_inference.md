@@ -13,6 +13,7 @@ def predict_sales(
     registry: ArtifactRegistry,
     environment: Literal["dev", "staging", "prod"],
     prediction_input: PredictionInput,
+    predictions_repository: PredictionsRepository | None = None,
 ) -> PredictionResult:
     """End-to-end inference (FR-021):
 
@@ -48,6 +49,16 @@ def predict_sales(
        `predicted_sales`, `run_id`, `model_name`, `environment`,
        `used_fallback_encoding`, `latency_ms`, appended to
        `.artifacts/mlops/predict_sales.log`.
+    9. **(Amendment 2026-08-26)** If `predictions_repository` is provided
+       (a `PredictionsRepository` — structurally, anything satisfying both
+       `SchemaProvider` and `DataProvider`, e.g. `PostgresRepository`), also
+       persists the same information as one row in the `Predictions` SQL
+       table via `src/mlops/predictions_store.py::persist_prediction`
+       (data-model.md § 9). This param is `None`-default and OPTIONAL —
+       `predict_sales` MUST still work with no DB connection at all (see
+       "Domain boundary rules" below); the CLI (`cmd_predict_sales`) passes
+       a live `PostgresRepository` best-effort (falls back to `None`, i.e.
+       JSONL-only logging, if Postgres is unreachable).
     """
 ```
 
@@ -89,8 +100,19 @@ with a fixture model trained on a small known vocabulary.
 
 - `src/mlops/inference.py` MUST NOT construct SQL or touch `QueryProvider` —
   inference operates ENTIRELY on the already-loaded model artifact + the
-  typed `PredictionInput`; it has no dependency on Postgres being reachable
-  (US4, Edge Cases: inference does not require a live DB connection).
+  typed `PredictionInput`; it has NO **mandatory** dependency on Postgres
+  being reachable (US4, Edge Cases: inference does not require a live DB
+  connection to produce a prediction). **Amendment (2026-08-26)**: it now
+  accepts an OPTIONAL `predictions_repository` for best-effort historic
+  persistence into the `Predictions` SQL table (step 9 above) — this is
+  additive and never blocks or fails the prediction itself; when omitted
+  (`None`), behavior is identical to before the amendment.
+- `src/mlops/predictions_store.py` (new, Amendment 2026-08-26) builds the
+  `Predictions` `TableDef`/`PredictionRow` and calls
+  `SchemaProvider.create_table`/`DataProvider.load_rows` — same engine-neutral
+  Protocols already used by `data_engineering` for `Orders`/`Returns`/`People`
+  (`src/data_access/interfaces.py`). It does not import `psycopg` or any
+  adapter internals, consistent with FR-026.
 - `src/mlops/inference.py` MUST import `derive_prediction_row` from
   `src/mlops/features.py` (not reimplement feature derivation) — a contract
   test asserts no duplicate temporal-feature/`has_discount` logic exists

@@ -201,7 +201,49 @@ src/mlops/split.py  ──chronological split (research.md Part B)──▶  (tr
                               PredictionInput ──derives (src/mlops/features.py, same code)──▶ SalesFeatureRow (no `sales`)
                                                             │
                               src/mlops/inference.py ──loads artifact + predicts──▶ PredictionResult
+                                                            │
+                              src/mlops/predictions_store.py ──persists (best-effort, FR-025)──▶ Predictions (Postgres table)
 ```
+
+### 9. `PredictionRow` / `Predictions` table
+
+**Amendment (2026-08-26)**: added to persist the historic log of `predict-sales`
+calls into a queryable SQL table (in addition to the pre-existing
+`.artifacts/mlops/predict_sales.log` JSONL append-log, which is unchanged).
+Defined in `src/contracts/data_access.py` (part of the `Row` union, alongside
+`OrderRow`/`ReturnRow`/`PersonRow`) — NOT in `src/contracts/mlops.py` —
+because it is persisted through the same engine-neutral `SchemaProvider`/
+`DataProvider` Protocols (`src/data_access/interfaces.py`) used for the
+`Orders`/`Returns`/`People` tables, materialized as a real Postgres table
+named `Predictions` (created idempotently by
+`src/mlops/predictions_store.py::ensure_predictions_table`, also invoked by
+`bootstrap`). One row is inserted per `predict-sales` invocation.
+
+| Field | Type | Notes |
+|---|---|---|
+| `prediction_id` | `str` | Surrogate UUID4 primary key, assigned at insert time — there is no natural key for a prediction event. |
+| `predicted_at` | `datetime` | UTC timestamp of the prediction (date **and** hour), assigned when the result is produced — independent of `order_date` below. |
+| `predicted_sales` | `Decimal` | Copied from `PredictionResult.predicted_sales`. |
+| `run_id` | `str` | Copied from `PredictionResult.run_id` — the promoted run that served the prediction. |
+| `model_name` | `str` | Copied from `PredictionResult.model_name`. |
+| `environment` | `str` | Copied from `PredictionResult.environment`. |
+| `order_date`, `ship_mode`, `segment`, `region`, `market`, `product_id`, `sub_category`, `category`, `quantity`, `discount` | — | Every parameter of `PredictionInput` used to produce the prediction, copied verbatim (FR-025). |
+| `used_fallback_encoding` | `bool` | Copied from `PredictionResult.used_fallback_encoding`. |
+| `latency_ms` | `int` | Copied from `PredictionResult.latency_ms`. |
+
+**Validation rules**: same field-level constraints as the equivalent
+`PredictionInput`/`PredictionResult` fields (quantity `>= 0`, etc.) — enforced
+once at the Pydantic-model boundary before the row is built.
+
+**Persistence contract**: `predict_sales()` (`src/mlops/inference.py`) accepts
+an optional `predictions_repository: PredictionsRepository | None` parameter.
+When provided (the CLI passes a live `PostgresRepository` when Postgres is
+reachable), the prediction is persisted to `Predictions` in addition to the
+JSONL log; when `None` (e.g. offline/unit-test usage, or Postgres
+unreachable), only the JSONL log is written — `predict-sales` still MUST NOT
+require a live DB connection to produce a prediction (US4, Edge Cases, and
+the "no dependency on Postgres" invariant in `contracts/mlops_inference.md`
+remain true; only the *history persistence* is best-effort/optional).
 
 ## Out of scope for this data model
 
