@@ -155,6 +155,26 @@ class PredictionResult(BaseModel):
     latency_ms: int = Field(ge=0)
 
 
+class PredictionParseResult(BaseModel):
+    """Typed outcome of parsing a natural-language prediction request.
+
+    Produced by `src.ai_engineering.nl_predict` when the LLM is asked to
+    extract a `PredictionInput` from free text (v3.1 NL->predict-sales).
+    Exactly one of `prediction_input`/`missing_fields` should be meaningful:
+    when the LLM has enough information, `prediction_input` is populated and
+    `missing_fields` is empty; otherwise `prediction_input` is None and
+    `missing_fields` names what is required to complete the request.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    question: str
+    prediction_input: PredictionInput | None = None
+    missing_fields: list[str] = Field(default_factory=list)
+    clarification: str | None = None
+    raw_llm_output: str = ""
+
+
 __all__ = [
     "ArtifactRegistryDocument",
     "ArtifactRegistryEntry",
@@ -164,6 +184,7 @@ __all__ = [
     "ModelName",
     "ModelRunMetadata",
     "PredictionInput",
+    "PredictionParseResult",
     "PredictionResult",
     "PrimitiveValue",
     "PromotionRecord",

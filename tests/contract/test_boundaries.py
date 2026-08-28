@@ -338,6 +338,74 @@ def test_mlops_domain_has_no_forbidden_imports() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Boundary 10 (v3.1): matplotlib confined to src/reporting
+# ---------------------------------------------------------------------------
+
+_ALLOWED_MATPLOTLIB_DIR = _REPO_ROOT / "src" / "reporting"
+
+
+def test_matplotlib_confined_to_reporting() -> None:
+    """`matplotlib` MUST NOT be imported outside the reporting domain.
+
+    Constitution Principle II & III: charting is a presentation concern,
+    isolated in `src/reporting/` the same way pandas/psycopg/openai/sklearn
+    are each confined to a single domain.
+    """
+    src_root = _REPO_ROOT / "src"
+    offenders: list[str] = []
+    for py_file in _iter_python_files(src_root):
+        if "matplotlib" not in _top_level_modules(py_file):
+            continue
+        if _is_under(py_file, {_ALLOWED_MATPLOTLIB_DIR}):
+            continue
+        offenders.append(str(py_file.relative_to(_REPO_ROOT)))
+    assert not offenders, (
+        f"matplotlib imported outside the reporting domain: {offenders}. "
+        f"Only {_ALLOWED_MATPLOTLIB_DIR} may import matplotlib."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Boundary 11 (v3.1): ai_engineering NL->prediction/chart stays adapter-free
+# ---------------------------------------------------------------------------
+
+
+def test_nl_predict_and_nl_chart_do_not_import_mlops_or_reporting() -> None:
+    """`nl_predict.py`/`nl_chart.py` only depend on contracts + the LLM Protocol.
+
+    They must not import `src.mlops` (model loading/inference) or
+    `src.reporting` (matplotlib rendering) directly — those are orchestrated
+    by the CLI, keeping `src/ai_engineering` a pure prompt/parse layer.
+    """
+    ai_root = _REPO_ROOT / "src" / "ai_engineering"
+    forbidden_prefixes = ("src.mlops", "src.reporting")
+    offenders: list[str] = []
+    for py_file in _iter_python_files(ai_root):
+        try:
+            tree = ast.parse(py_file.read_text(encoding="utf-8"))
+        except SyntaxError:
+            continue
+        full_modules: set[str] = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and node.module is not None:
+                full_modules.add(node.module)
+            elif isinstance(node, ast.Import):
+                for alias in node.names:
+                    full_modules.add(alias.name)
+        bad = sorted(
+            module
+            for module in full_modules
+            if any(module == prefix or module.startswith(f"{prefix}.") for prefix in forbidden_prefixes)
+        )
+        if bad:
+            offenders.append(f"{py_file.relative_to(_REPO_ROOT)} -> {bad}")
+    assert not offenders, (
+        "src/ai_engineering/ imported mlops/reporting internals directly: "
+        f"{offenders}"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Boundary 9 (v3.0): MLOps contracts are Pydantic v2 frozen models
 # ---------------------------------------------------------------------------
 

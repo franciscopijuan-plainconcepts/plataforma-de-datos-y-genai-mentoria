@@ -24,7 +24,7 @@ import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from dotenv import load_dotenv
 
@@ -56,6 +56,14 @@ _SEMANTIC_LAYER_MD_PATH = _REPO_ROOT / ".artifacts" / "semantic_layer.md"
 # Expected row counts from the EDA (see research.md Part A) — the validator
 # uses these to confirm the loaded warehouse matches the canonical dataset.
 
+if TYPE_CHECKING:
+    # Only needed for the `_run_ask_pipeline` return-type annotation below;
+    # the real imports happen lazily inside the functions that use them so
+    # the module-level import graph (and the boundary contract tests) stay
+    # unaffected.
+    from src.contracts.semantic_layer import SemanticViewer
+    from src.contracts.text_to_sql import TextToSqlResponse
+
 # Load .env from the repository root so FORGE_API_KEY and POSTGRES_* are
 # available without manually sourcing .env. Safe if .env doesn't exist.
 load_dotenv(_REPO_ROOT / ".env")
@@ -64,6 +72,7 @@ _EXPECTED_ROW_COUNTS = {
     "Returns": 2033,
     "People": 24,
 }
+
 
 
 # ---------------------------------------------------------------------------
@@ -361,10 +370,46 @@ def cmd_ask(
       - When the Semantic Layer artifact exists at `.artifacts/semantic_layer.json`,
         loads it and passes it to the pipeline so the prompt includes metrics.
     """
+    response, viewer = _run_ask_pipeline(question, viewer_id, allow_full_access)
+
+    # --- Print results ---
+    if response.error:
+        print(f"Error: {response.error}")
+        sys.exit(1)
+
+    print(f"Question: {response.question.text}")
+    print(f"Viewer: {viewer_id or 'full_access_local_dev'} (regions: {list(viewer.regions)})")
+    print(f"Generated SQL: {response.generated_sql.sql}")
+    print(f"Validation: {'ACCEPTED' if response.validation.accepted else 'REJECTED'}")
+    if response.validation.reason:
+        print(f"  Reason: {response.validation.reason}")
+
+    if response.query_result is not None:
+        if response.query_result.error:
+            print(f"Execution error: {response.query_result.error}")
+            print(f"  SQL: {response.query_result.sql}")
+        else:
+            print(f"Rows ({response.query_result.row_count}):")
+            for row in response.query_result.rows:
+                print(f"  {row.data}")
+            print(f"Latency: {response.query_result.latency_ms}ms")
+
+
+def _run_ask_pipeline(
+    question: str,
+    viewer_id: str | None,
+    allow_full_access: bool,
+) -> tuple["TextToSqlResponse", "SemanticViewer"]:
+    """Shared setup for `ask` and `chart`: build + run the Text-to-SQL pipeline.
+
+    Factored out of `cmd_ask` so `cmd_chart` (v3.1 NL->chart) can reuse the
+    exact same governed, semantically-enriched pipeline instead of duplicating
+    ~150 lines of viewer resolution + prompt-context building.
+    """
     from src.ai_engineering.llm_client import LlmClient
     from src.ai_engineering.pipeline import TextToSqlPipeline
     from src.contracts.semantic_layer import SemanticViewer
-    from src.contracts.text_to_sql import LlmConfig, NLQuestion
+    from src.contracts.text_to_sql import LlmConfig, NLQuestion, TextToSqlResponse
     from src.data_engineering.semantic_layer.builder import SemanticLayerBuilder
     from src.data_engineering.semantic_layer.governed_provider import (
         build_governed_provider,
@@ -544,27 +589,138 @@ def cmd_ask(
         )
         response = pipeline.run(NLQuestion(text=question))
 
-    # --- Print results ---
+    return response, viewer
+
+
+def cmd_chart(
+    question: str,
+    viewer_id: str | None = None,
+    allow_full_access: bool = False,
+) -> None:
+    """chart: translate a natural-language request into a saved PNG chart.
+
+    v3.1: reuses the governed Text-to-SQL pipeline (`ask`) to fetch data,
+    then asks the LLM (via `src.ai_engineering.nl_chart`) to choose a chart
+    type + axis mapping from the returned columns, and renders it with
+    `src.reporting.chart_renderer` (matplotlib, Agg backend) to
+    `.artifacts/charts/`.
+    """
+    from src.ai_engineering.llm_client import LlmClient
+    from src.ai_engineering.nl_chart import ChartSpecAssistant
+    from src.contracts.text_to_sql import LlmConfig, NLQuestion
+    from src.reporting.chart_renderer import ChartRenderError, render_chart
+
+    response, viewer = _run_ask_pipeline(question, viewer_id, allow_full_access)
+
     if response.error:
-        print(f"Error: {response.error}")
+        _err(f"Text-to-SQL step failed: {response.error}")
+    if not response.validation.accepted:
+        _err(f"Generated SQL was rejected: {response.validation.reason}")
+    if response.query_result is None or response.query_result.error:
+        err_msg = response.query_result.error if response.query_result else "no result"
+        _err(f"Query execution failed: {err_msg}")
+
+    query_result = response.query_result
+    if not query_result.rows:
+        _err("The query returned 0 rows; nothing to chart.")
+
+    columns = sorted(query_result.rows[0].data.keys())
+    _info(f"Query returned {query_result.row_count} row(s) with columns: {columns}")
+
+    llm_config = LlmConfig.from_env()
+    llm_client = LlmClient(llm_config)
+    assistant = ChartSpecAssistant(llm_client=llm_client)
+    parse_result = assistant.parse(NLQuestion(text=question), columns)
+
+    if parse_result.spec is None:
+        _err(f"Could not derive a chart specification: {parse_result.error}")
+
+    print(
+        f"Chart spec: type={parse_result.spec.chart_type} "
+        f"x={parse_result.spec.x_field} y={parse_result.spec.y_field} "
+        f"aggregation={parse_result.spec.aggregation} title={parse_result.spec.title!r}"
+    )
+
+    try:
+        chart_result = render_chart(query_result, parse_result.spec)
+    except ChartRenderError as exc:
+        _err(str(exc))
+
+    print(f"Chart saved to: {chart_result.image_path}")
+    print(f"Data points plotted: {chart_result.point_count}")
+
+
+def cmd_predict_sales_nl(question: str, environment: str) -> None:
+    """predict-sales-nl: extract a prediction request from NL text and run it.
+
+    v3.1: uses `src.ai_engineering.nl_predict` (LLM JSON extraction, grounded
+    with the categorical vocabularies observed by the *promoted* model in
+    `environment`) to build a typed `PredictionInput`, then calls the exact
+    same `src.mlops.inference.predict_sales` used by the `predict-sales` CLI
+    command — the LLM never touches the model directly, it only fills in the
+    typed contract that the model already knows how to consume.
+    """
+    from src.ai_engineering.llm_client import LlmClient
+    from src.ai_engineering.nl_predict import PredictSalesAssistant
+    from src.contracts.text_to_sql import LlmConfig, NLQuestion
+    from src.mlops.inference import predict_sales
+    from src.mlops.registry import ArtifactRegistry, NoActiveModelError, RegistryError
+
+    try:
+        llm_config = LlmConfig.from_env()
+    except ValueError as exc:
+        _err(str(exc))
+
+    registry = ArtifactRegistry()
+    active_entry = registry.resolve_active_run(cast("Any", environment))
+    if active_entry is None:
+        _err(
+            f"No active model promoted in environment {environment!r}. "
+            "Run train-sales-model + promote-sales-model first."
+        )
+
+    model = registry.load_model(active_entry)
+    known_categories = cast(
+        "dict[str, list[str]]",
+        getattr(model, "_mlops_categorical_vocabularies", {}),
+    )
+
+    llm_client = LlmClient(llm_config)
+    assistant = PredictSalesAssistant(llm_client=llm_client, known_categories=known_categories)
+    parse_result = assistant.parse(NLQuestion(text=question))
+
+    if parse_result.prediction_input is None:
+        print("Could not extract a complete prediction request from the question.")
+        if parse_result.missing_fields:
+            print(f"Missing fields: {parse_result.missing_fields}")
+        if parse_result.clarification:
+            print(f"Assistant: {parse_result.clarification}")
         sys.exit(1)
 
-    print(f"Question: {response.question.text}")
-    print(f"Viewer: {viewer_id or 'full_access_local_dev'} (regions: {list(viewer.regions)})")
-    print(f"Generated SQL: {response.generated_sql.sql}")
-    print(f"Validation: {'ACCEPTED' if response.validation.accepted else 'REJECTED'}")
-    if response.validation.reason:
-        print(f"  Reason: {response.validation.reason}")
+    print(f"Parsed prediction input: {parse_result.prediction_input.model_dump(mode='json')}")
 
-    if response.query_result is not None:
-        if response.query_result.error:
-            print(f"Execution error: {response.query_result.error}")
-            print(f"  SQL: {response.query_result.sql}")
-        else:
-            print(f"Rows ({response.query_result.row_count}):")
-            for row in response.query_result.rows:
-                print(f"  {row.data}")
-            print(f"Latency: {response.query_result.latency_ms}ms")
+    repo: PostgresRepository | None
+    try:
+        repo = PostgresRepository(config=PostgresConfig.from_env())
+    except Exception:
+        repo = None
+
+    try:
+        result = predict_sales(registry, cast("Any", environment), parse_result.prediction_input, repo)
+    except (NoActiveModelError, RegistryError) as exc:
+        _err(str(exc))
+    except Exception as exc:
+        _err(f"predict-sales-nl failed: {exc}")
+    finally:
+        if repo is not None:
+            repo.close()
+
+    print(f"Predicted Sales: {result.predicted_sales}")
+    print(
+        f"Model: {result.model_name} (run_id={result.run_id}, environment={result.environment})"
+    )
+    print(f"used_fallback_encoding: {str(result.used_fallback_encoding).lower()}")
+    print(f"latency_ms: {result.latency_ms}")
 
 
 def cmd_train_sales_model() -> None:
@@ -837,7 +993,7 @@ def main(argv: list[str] | None = None) -> None:
     """CLI entrypoint: `python -m src.cli <command>`."""
     args = argv if argv is not None else sys.argv[1:]
     if not args or args[0] in ("-h", "--help"):
-        print("Usage: python -m src.cli.main {bootstrap|teardown|validate|generate-dictionary|generate-semantic-layer|ask|evaluate|train-sales-model|promote-sales-model|predict-sales} [args]")
+        print("Usage: python -m src.cli.main {bootstrap|teardown|validate|generate-dictionary|generate-semantic-layer|ask|chart|evaluate|train-sales-model|promote-sales-model|predict-sales|predict-sales-nl} [args]")
         print("Commands:")
         print("  bootstrap [--source PATH]        Bring up PG, load data, write manifest")
         print("  teardown [--remove-volume]        Stop & remove container (and optionally volume)")
@@ -848,12 +1004,18 @@ def main(argv: list[str] | None = None) -> None:
         print("                                      (--viewer <id> resolves a person from the")
         print("                                       People table, or a custom viewer from")
         print("                                       viewers.yaml)")
+        print("  chart <question> [--viewer <id>]   Translate a NL request into a saved PNG chart")
+        print("                                      (runs ask, then LLM picks chart type/axes,")
+        print("                                       renders to .artifacts/charts/)")
         print("  evaluate                           Run sanity-check evaluation (v1.1)")
         print("  train-sales-model                  Train, compare, and persist both sales models")
         print("  promote-sales-model --run-id ID --env {dev,staging,prod} [--force]")
         print("                                      Promote a persisted run to an environment")
         print("  predict-sales --env ENV --ship-mode ... --order-date YYYY-MM-DD")
         print("                                      Predict sales using the promoted model")
+        print("  predict-sales-nl <question> --env ENV")
+        print("                                      LLM extracts the prediction inputs from a")
+        print("                                       natural-language question, then predicts")
         sys.exit(0 if args else 1)
 
     command = args[0]
@@ -891,6 +1053,50 @@ def main(argv: list[str] | None = None) -> None:
             _err("Usage: python -m src.cli.main ask <question> [--viewer <id>]")
         question_text = " ".join(question_tokens)
         cmd_ask(question_text, viewer_id=viewer_id, allow_full_access=allow_full)
+        return
+    if command == "chart":
+        # Same flag grammar as `ask`: --viewer <id>, --allow-full-access.
+        chart_viewer_id: str | None = None
+        chart_allow_full = False
+        chart_question_tokens: list[str] = []
+        i = 0
+        while i < len(rest):
+            tok = rest[i]
+            if tok in ("--viewer", "-v") and i + 1 < len(rest):
+                chart_viewer_id = rest[i + 1]
+                i += 2
+                continue
+            if tok == "--allow-full-access":
+                chart_allow_full = True
+                i += 1
+                continue
+            chart_question_tokens.append(tok)
+            i += 1
+        if not chart_question_tokens:
+            _err("Usage: python -m src.cli.main chart <question> [--viewer <id>]")
+        cmd_chart(
+            " ".join(chart_question_tokens),
+            viewer_id=chart_viewer_id,
+            allow_full_access=chart_allow_full,
+        )
+        return
+    if command == "predict-sales-nl":
+        nl_environment: str | None = None
+        nl_question_tokens: list[str] = []
+        i = 0
+        while i < len(rest):
+            tok = rest[i]
+            if tok == "--env" and i + 1 < len(rest):
+                nl_environment = rest[i + 1]
+                i += 2
+                continue
+            nl_question_tokens.append(tok)
+            i += 1
+        if not nl_question_tokens or nl_environment is None:
+            _err("Usage: python -m src.cli.main predict-sales-nl <question> --env <dev|staging|prod>")
+        if nl_environment not in {"dev", "staging", "prod"}:
+            _err(f"Invalid environment: {nl_environment!r}. Use dev|staging|prod.")
+        cmd_predict_sales_nl(" ".join(nl_question_tokens), nl_environment)
         return
     if command == "evaluate":
         cmd_evaluate()
@@ -963,7 +1169,7 @@ def main(argv: list[str] | None = None) -> None:
         return
     handler = _COMMANDS.get(command)
     if handler is None:
-        _err(f"Unknown command: {command!r}. Use bootstrap|teardown|validate|generate-dictionary|generate-semantic-layer|ask|evaluate|train-sales-model|promote-sales-model|predict-sales.")
+        _err(f"Unknown command: {command!r}. Use bootstrap|teardown|validate|generate-dictionary|generate-semantic-layer|ask|chart|evaluate|train-sales-model|promote-sales-model|predict-sales|predict-sales-nl.")
 
     # Parse simple per-command args.
     if command == "bootstrap":

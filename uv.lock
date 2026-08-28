@@ -1107,6 +1107,7 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "catboost" },
+    { name = "matplotlib" },
     { name = "openai" },
     { name = "openpyxl" },
     { name = "pandas" },
@@ -1132,6 +1133,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "catboost", specifier = ">=1.2.10" },
+    { name = "matplotlib", specifier = ">=3.9" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.10" },
     { name = "openai", specifier = ">=2.53.0" },
     { name = "openpyxl", specifier = ">=3.1" },

@@ -51,5 +51,22 @@ class LlmClient:
             raw_response=response.model_dump(),
         )
 
+    def complete(self, prompt: str) -> str:
+        """Send a prompt to the LLM and return the raw text response.
+
+        Generic completion used by NL->structured-output flows that are not
+        SQL generation (v3.1: NL->predict-sales, NL->chart). Callers are
+        responsible for parsing/validating the returned text (typically JSON)
+        into a typed contract model — this method makes no assumptions about
+        the response shape.
+        """
+        response = self._client.chat.completions.create(
+            model=self._config.model_name,
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=self._config.max_tokens,
+            temperature=self._config.temperature,
+        )
+        return (response.choices[0].message.content or "").strip()
+
 
 __all__ = ["LlmClient"]

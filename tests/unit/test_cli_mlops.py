@@ -92,3 +92,61 @@ def test_predict_sales_without_promoted_model_fails(cli_registry: ArtifactRegist
     captured = capsys.readouterr()
     assert exc_info.value.code == 1
     assert "No active model" in captured.err
+
+
+class _FakePredictLlmClient:
+    """Fake LLM client swapped in for `src.ai_engineering.llm_client.LlmClient`."""
+
+    _RESPONSE = (
+        '{"status": "ok", "prediction_input": {'
+        '"order_date": "2026-08-20", "ship_mode": "Second Class", '
+        '"segment": "Consumer", "region": "West", "market": "US", '
+        '"product_id": "TEC-AC-10003033", "sub_category": "Accessories", '
+        '"category": "Technology", "quantity": 3, "discount": 0.0}, '
+        '"missing_fields": [], "clarification": ""}'
+    )
+
+    def __init__(self, config: object) -> None:
+        del config
+
+    def complete(self, prompt: str) -> str:
+        del prompt
+        return self._RESPONSE
+
+
+def test_predict_sales_nl_without_promoted_model_fails(
+    cli_registry: ArtifactRegistry,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("FORGE_API_KEY", "test-key")
+    monkeypatch.setattr("src.ai_engineering.llm_client.LlmClient", _FakePredictLlmClient)
+    with pytest.raises(SystemExit) as exc_info:
+        main(["predict-sales-nl", "predict sales for a West region order", "--env", "dev"])
+    captured = capsys.readouterr()
+    assert exc_info.value.code == 1
+    assert "No active model" in captured.err
+
+
+def test_predict_sales_nl_parses_and_predicts_with_promoted_model(
+    cli_registry: ArtifactRegistry,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("FORGE_API_KEY", "test-key")
+    monkeypatch.setattr("src.ai_engineering.llm_client.LlmClient", _FakePredictLlmClient)
+    run_id = _persist_linear_run(cli_registry)
+    cli_registry.promote(run_id, "dev")
+
+    main([
+        "predict-sales-nl",
+        "Predict the sales for a Second Class Consumer order in the West "
+        "region, market US, product TEC-AC-10003033, sub-category "
+        "Accessories, category Technology, quantity 3, no discount, ordered "
+        "2026-08-20.",
+        "--env",
+        "dev",
+    ])
+    captured = capsys.readouterr()
+    assert "Predicted Sales" in captured.out
+    assert "Parsed prediction input" in captured.out
