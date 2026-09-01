@@ -1323,7 +1323,7 @@ def main(argv: list[str] | None = None) -> None:
     """CLI entrypoint: `python -m src.cli <command>`."""
     args = argv if argv is not None else sys.argv[1:]
     if not args or args[0] in ("-h", "--help"):
-        print("Usage: python -m src.cli.main {bootstrap|teardown|validate|generate-dictionary|generate-semantic-layer|ask|chart|evaluate|train-sales-model|promote-sales-model|predict-sales|predict-sales-nl} [args]")
+        print("Usage: python -m src.cli.main {bootstrap|teardown|validate|generate-dictionary|generate-semantic-layer|metabase|ask|chart|evaluate|train-sales-model|promote-sales-model|predict-sales|predict-sales-nl} [args]")
         print("Commands:")
         print("  bootstrap [--source PATH]        Bring up PG, load data, write manifest")
         print("  teardown [--remove-volume]        Stop & remove container (and optionally volume)")
@@ -1547,7 +1547,7 @@ def main(argv: list[str] | None = None) -> None:
         return
     handler = _COMMANDS.get(command)
     if handler is None:
-        _err(f"Unknown command: {command!r}. Use bootstrap|teardown|validate|generate-dictionary|generate-semantic-layer|ask|chart|evaluate|train-sales-model|promote-sales-model|predict-sales|predict-sales-nl.")
+        _err(f"Unknown command: {command!r}. Use bootstrap|teardown|validate|generate-dictionary|generate-semantic-layer|metabase|ask|chart|evaluate|train-sales-model|promote-sales-model|predict-sales|predict-sales-nl.")
 
     # Parse simple per-command args.
     if command == "bootstrap":

@@ -87,6 +87,10 @@ def validate_sql(sql: str, table_def: TableDef) -> ValidationResult:
     column_aliases: set[str] = set()
     for match in re.finditer(r"\bas\s+([a-z_][a-z0-9_]*)", sql_lower):
         column_aliases.add(match.group(1))
+    # Also accept QUOTED aliases, e.g. `SUM("Sales") AS "gross_sales"` — the
+    # LLM sometimes quotes them and they were being rejected as unknown columns.
+    for match in re.finditer(r'\bas\s+"([^"]+)"', sql_lower):
+        column_aliases.add(match.group(1))
 
     for ref in table_refs:
         if ref == "people":
