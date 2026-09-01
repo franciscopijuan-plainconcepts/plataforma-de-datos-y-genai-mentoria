@@ -94,6 +94,16 @@ class LogicalType(str, Enum):
 - `ReturnRow.returned`: `str` (always `"Yes"` but kept as `str` not `Literal["Yes"]` to detect source drift).
 - `PersonRow.person`: `str` (normalized at load — non-breaking spaces stripped).
 
+> **Amendment (2026-08-26, feature `004-sales-prediction-model`)**: `PredictionRow`
+> was added to the `Row` union — one row per `predict-sales` call, persisted
+> into a `Predictions` table via the same `SchemaProvider`/`DataProvider`
+> Protocols. Unlike `OrderRow`/`ReturnRow`/`PersonRow`, it is not sourced from
+> the Excel workbook/schema-inference pipeline; its `TableDef` is built
+> directly in code (`src/mlops/predictions_store.py::predictions_table_def`)
+> and its primary key (`prediction_id`) is a surrogate UUID4 assigned at
+> insert time. See `specs/004-sales-prediction-model/data-model.md` § 9 for
+> the full field list.
+
 ### `LoadResult`
 
 | Field | Type | Notes |

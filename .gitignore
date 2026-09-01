@@ -59,6 +59,10 @@ desktop.ini
 # baseline so reviewers can read it without running the pipeline. Uncomment
 # to ignore it if you prefer to regenerate on demand.
 # data_dictionary.md
+# --- MLOps artifacts ---
+.artifacts/mlops/models/
+.artifacts/mlops/predict_sales.log
+.artifacts/mlops/registry.json
 
 # --- Metabase local state cache (feature 004) ---
 # `metabase setup` writes the latest known state (admin email, db_id,

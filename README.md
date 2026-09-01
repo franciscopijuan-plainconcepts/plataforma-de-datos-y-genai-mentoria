@@ -4,8 +4,9 @@ A Data and GenAI Platform that connects Generative AI to a Data Warehouse —
 with governed Semantic Layer (RLS), Text-to-SQL via Forge LLM, and Metabase
 visualization of governed SQL cards.
 
-> **Status**: v2.1 — Baseline + Text-to-SQL + Semantic Layer (RLS governance) + Metabase integration.
-> See [README_STATUS.md](README_STATUS.md) for the roadmap (milestones M0–M3.1 delivered).
+> **Status**: v3.0 — Baseline + Text-to-SQL + Semantic Layer (RLS governance) + Metabase integration + Sales Prediction MLOps.
+> The warehouse, data dictionary, NL→SQL pipeline, governed Semantic Layer, Metabase SQL-card flow, and end-to-end sales-model training/promotion/inference flow are delivered.
+> See [README_STATUS.md](README_STATUS.md) for the roadmap and current status (milestones M0–M4 delivered).
 
 ---
 
@@ -36,6 +37,16 @@ This platform lets you:
    creates a card in Metabase with the **already-governed SQL**, so you can
    see charts and dashboards without writing SQL yourself.
 
+4. **Train, promote, and run sales predictions locally** — an isolated `src/mlops/` domain trains two regressors over `Orders`, promotes approved runs across `dev`/`staging`/`prod`, and serves governed CLI inference flows with persisted prediction history.
+
+### Sales Prediction Model (M4 / v3.0 MLOps)
+
+- A new isolated `src/mlops/` domain trains two `Sales` regressors over `Orders`: a `LinearRegression` baseline and a `CatBoostRegressor` with native categorical handling.
+- Features: temporal fields derived from `Order Date`, `Ship Mode`, `Segment`, `Region`, `Market`, `Product ID`, `Sub-Category`, `Category`, `Quantity`, and `has_discount`. `City`/`State`/`Country`/`Product Name` were deliberately excluded — see `specs/004-sales-prediction-model/spec.md` § Amendment for the cardinality-based rationale.
+- `train-sales-model` extracts training data only through the `QueryProvider`, applies shared feature engineering, performs a chronological split, compares RMSE/MAE/R² side by side, and persists both runs in `.artifacts/mlops/`.
+- `promote-sales-model` enforces staged promotion (`dev`/`staging`/`prod`) with an explicit `--force` governance bypass recorded in the registry history.
+- `predict-sales` loads the promoted model for an environment, reuses the exact same feature derivation logic as training, logs latency/input/output, degrades gracefully on unseen categories (`used_fallback_encoding`), and persists a historic row into the `Predictions` SQL table in addition to `.artifacts/mlops/predict_sales.log`.
+
 ### Milestones delivered
 
 | Milestone | Version | What it delivers |
@@ -45,6 +56,7 @@ This platform lets you:
 | M2 | v1.1 | Logging + sanity-check evaluation (~10 questions) |
 | M3 | v2.0 | Semantic Layer: 8 metrics, 11 dimensions, RLS enforcement via `GovernedQueryProvider` |
 | M3.1 | v2.1 | Metabase integration: governed SQL cards from chat sessions + CLI ops |
+| M4 | v3.0 | Sales Prediction MLOps: training, registry, staged promotion, inference |
 
 ---
 
@@ -55,12 +67,13 @@ You need these installed on your machine **before** starting:
 - **[Docker](https://www.docker.com/)** (with Docker Compose) — must be running.
   Verify: `docker info` returns successfully.
 - **[`uv`](https://docs.astral.sh/uv/)** (Python package manager).
-  Verify: `uv --version` returns a version.
+  Verify: `uv --version` returns a version. `uv sync` also installs the project dependencies used by the MLOps flow, including `scikit-learn` and `catboost`.
 - **The source file `Global Superstore Data.xlsx`** in the repository root.
   (This is the Global Superstore Dataset — not included in the repo; ask the
   team for the file or download it from Kaggle.)
 - **Forge API key** — the corporate LLM proxy at `https://forge.plainconcepts.com/v1`.
   You need a valid `FORGE_API_KEY` (ask the team or IT).
+- **Semantic Layer viewers** — real-person viewers resolve directly from the `People` table (for example `--viewer marilene_rousseau`), so no YAML is needed for standard RLS flows. A local `viewers.yaml` is only required for escape hatches like `admin_dev`; copy `viewers.example.yaml` if you need those.
 
 ---
 
@@ -219,9 +232,9 @@ uv run python scripts/metabase_bootstrap.py
 **Expected output**:
 
 ```
-============================================================
+ ============================================================
 Metabase Bootstrap (v0.58 LTS API compatibility)
-============================================================
+ ============================================================
 Step 0: Checking Metabase health...
   [OK] Metabase is healthy.
 Step 7: Ensuring metabase_readonly PG role...
@@ -240,14 +253,14 @@ Step 5: Creating 'Chat Sessions' collection...
 Step 6: Persisting state...
   [OK] State persisted to .artifacts/metabase_state.json.
 
-============================================================
+ ============================================================
 Metabase bootstrap complete!
   URL           : http://localhost:3000
   Admin email   : admin@plataforma.local
   DB connection : id=2 (PostgreSQL via metabase_readonly)
   Collection    : id=5 ('Chat Sessions')
   State         : .artifacts/metabase_state.json
-============================================================
+ ============================================================
 ```
 
 ### Step 9: Copy `viewers.yaml` for escape hatches (optional)
@@ -260,6 +273,32 @@ cp viewers.example.yaml viewers.yaml
 viewer configurations (escape hatches like `admin_dev` with
 `allows_full_access: true`). **You do NOT need this for real-person logins**
 — `--viewer marilene_rousseau` resolves from the `People` table directly.
+
+### Step 10: Train the sales-prediction models
+
+```bash
+uv run python -m src.cli.main train-sales-model
+```
+
+This trains the `linear_regression` and `catboost` regressors, compares their metrics, and persists both runs under `.artifacts/mlops/`.
+
+### Step 11: Promote a validated run
+
+```bash
+uv run python -m src.cli.main promote-sales-model --run-id <run_id> --env staging
+```
+
+Use this after inspecting the training output and choosing the run you want to move forward in the `dev` → `staging` → `prod` lifecycle.
+
+### Step 12: Predict sales from the promoted model
+
+```bash
+uv run python -m src.cli.main predict-sales --env prod --ship-mode "Standard Class" --segment "Home Office" --region "Southern Asia" --market "Asia Pacific" --product-id "FUR-BO-4861" --sub-category "Bookcases" --category "Furniture" --quantity 2 --discount 0.0 --order-date 2017-03-22
+```
+
+This reuses the promoted artifact for the selected environment, prints the prediction, and appends a structured log entry to `.artifacts/mlops/predict_sales.log`.
+
+See [`specs/001-data-genai-platform-baseline/quickstart.md`](specs/001-data-genai-platform-baseline/quickstart.md) for the baseline validation guide, [`specs/003-semantic-layer-v1/quickstart.md`](specs/003-semantic-layer-v1/quickstart.md) for Semantic Layer validation, [`specs/004-metabase-integration/quickstart.md`](specs/004-metabase-integration/quickstart.md) for the Metabase workflow, and [`specs/004-sales-prediction-model/quickstart.md`](specs/004-sales-prediction-model/quickstart.md) for the sales-prediction train → promote → predict flow.
 
 ---
 
@@ -395,6 +434,9 @@ summary (`X / N correct`).
 | `metabase cards` | List all cards in the "Chat Sessions" collection (with viewer_id from description). |
 | `metabase teardown [--remove-volume]` | Stop + remove Metabase container (and optionally its data volume). PG warehouse untouched. |
 | `metabase reset-cards` | Delete all cards in "Chat Sessions" collection (admin user + DB connection preserved). |
+| `train-sales-model` | Train and compare the local `linear_regression` and `catboost` sales models; persist runs under `.artifacts/mlops/`. |
+| `promote-sales-model --run-id <id> --env <dev\|staging\|prod>` | Promote a persisted run through the staged model lifecycle; `--force` records an explicit governance bypass. |
+| `predict-sales --env <env> ...` | Load the promoted model for an environment and predict `Sales` from the provided order features. |
 | `ask <question>` | Translate a natural-language question to SQL, apply RLS, execute, return typed rows. |
 | `ask --viewer <id>` | Login as a person (from the `People` table) and scope results to that person's region. |
 | `ask --allow-full-access` | Escape hatch for local/dev only (no RLS filtering). Logged as `gov.bypass`. |
@@ -428,16 +470,11 @@ The platform follows the constitution in
   - `src/contracts/` — typed Pydantic v2 models at every boundary.
   - `src/data_engineering/` — EDA, ingestion, dictionary, Semantic Layer.
   - `src/ai_engineering/` — LLM client, prompt builder, SQL validator, pipeline, Metabase client.
+  - `src/mlops/` — sales-model training, registry, promotion, inference.
   - `src/data_access/` — engine-agnostic Protocols + PostgreSQL adapter.
   - `src/cli/` — composition root (wires everything together).
-- **Portable data access**: engine-specific code (psycopg) confined to
-  `src/data_access/adapters/postgres/`. Future BigQuery migration requires no
-  change to upstream code.
-- **Data Governance by default** (Principle IV, NON-NEGOTIABLE): RLS enforced
-  by the `GovernedQueryProvider` decorator on every `execute_readonly_query`
-  call. No LLM-generated SQL can bypass `WHERE "Region" IN (viewer.regions)`.
-  Metabase cards contain the ALREADY-GOVERNED SQL — re-executing them from
-  Metabase returns only the viewer's scoped data.
+- **Portable data access**: engine-specific code (psycopg) confined to `src/data_access/adapters/postgres/`. Future BigQuery migration requires no change to upstream code.
+- **Data Governance by default** (Principle IV, NON-NEGOTIABLE): RLS enforced by the `GovernedQueryProvider` decorator on every `execute_readonly_query` call. No LLM-generated SQL can bypass `WHERE "Region" IN (viewer.regions)`. Metabase cards contain the already-governed SQL, so re-executing them from Metabase returns only the viewer's scoped data. The batch MLOps training path is an explicit, documented Principle IV deferral distinct from the NL→SQL path.
 
 ### Docker services
 
@@ -462,6 +499,7 @@ src/
     text_to_sql.py                #   NLQuestion, GeneratedSql, TextToSqlResponse
     semantic_layer.py             #   SemanticLayerDocument, SemanticViewer, Metric
     metabase.py                   #   MetabaseConfig, Card, Collection, Dashboard
+    mlops.py                      #   Training runs, registry, promotions, predictions
   data_engineering/               # Data Engineering domain
     dictionary/                   #   Generator + renderer + semantic source
     eda/                          #   EDA explorer + schema inferrer
@@ -476,11 +514,14 @@ src/
     pipeline.py                   #   Orchestrates: prompt to LLM to validate to execute
     evaluation.py                 #   Sanity-check harness (~10 questions)
     metabase_client.py            #   MetabaseClient (ONLY module that imports httpx)
+  mlops/                          # MLOps domain
+    ...                           #   Sales-model training, registry, promotion, inference
   data_access/                    # Engine-agnostic data-access layer
     interfaces.py                 #   Protocols (SchemaProvider, DataProvider, QueryProvider)
     adapters/postgres/            #   PostgreSQL adapter (repository, connection, roles)
-  cli/                             # CLI entrypoints (composition root)
-    main.py                       #   All commands: bootstrap, validate, ask, metabase, evaluate
+  cli/                            # CLI entrypoints (composition root)
+    main.py                       #   Commands: bootstrap, ask, metabase, evaluate, train-sales-model,
+                                  #   promote-sales-model, predict-sales, teardown, validate
 scripts/                          # Standalone scripts
   metabase_bootstrap.py           #   Metabase initial setup (admin user + DB + collection + PG role)
 tests/                            # contract / integration / unit tests
@@ -489,12 +530,17 @@ specs/                            # Feature specs (spec.md, plan.md, research.md
   002-text-to-sql-v1/
   003-semantic-layer-v1/
   004-metabase-integration/
+  004-sales-prediction-model/
 .artifacts/                       # Runtime artifacts
   load_manifest.json              #   Provenance for the loaded data
   semantic_layer.json             #   Canonical, deterministic Semantic Layer artifact
   semantic_layer.md               #   Human-readable Semantic Layer
   metabase_state.json             #   Metabase setup state cache (idempotency)
   text_to_sql.log                 #   Structured log per ask call
+  mlops/                          #   Sales-model runtime artifacts
+    models/                       #     Serialized runs by model/run_id
+    predict_sales.log             #     Structured inference log
+    registry.json                 #     Promotion history + active aliases
 viewers.example.yaml              # Template for viewers.yaml (committed)
 viewers.yaml                      # Local-only viewer config (gitignored)
 .env                              # Local secrets (gitignored)
@@ -505,11 +551,8 @@ viewers.yaml                      # Local-only viewer config (gitignored)
 
 ## Team Handoff Docs
 
-- [README_SPECKIT.md](README_SPECKIT.md): how Spec Kit was used in this repo,
-  folder-by-folder explanation of artifacts, and a continuation playbook for
-  future features.
-- [README_STATUS.md](README_STATUS.md): current project status, delivered scope,
-  risks, roadmap milestones, and next recommended execution steps.
+- [README_SPECKIT.md](README_SPECKIT.md): how Spec Kit was used in this repo, folder-by-folder explanation of artifacts, and a continuation playbook for future features.
+- [README_STATUS.md](README_STATUS.md): current project status, delivered scope, risks, roadmap milestones, and next recommended execution steps.
 
 ---
 

@@ -24,10 +24,11 @@ import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from dotenv import load_dotenv
 
+from src.contracts.data_access import TableDef
 from src.contracts.ingestion import SchemaInferenceResult
 from src.data_access.adapters.postgres.connection import PostgresConfig
 from src.data_access.adapters.postgres.repository import PostgresRepository
@@ -61,6 +62,14 @@ _SEMANTIC_LAYER_MD_PATH = _REPO_ROOT / ".artifacts" / "semantic_layer.md"
 # Expected row counts from the EDA (see research.md Part A) — the validator
 # uses these to confirm the loaded warehouse matches the canonical dataset.
 
+if TYPE_CHECKING:
+    # Only needed for the `_run_ask_pipeline` return-type annotation below;
+    # the real imports happen lazily inside the functions that use them so
+    # the module-level import graph (and the boundary contract tests) stay
+    # unaffected.
+    from src.contracts.semantic_layer import SemanticViewer
+    from src.contracts.text_to_sql import TextToSqlResponse
+
 # Load .env from the repository root so FORGE_API_KEY, POSTGRES_*, METABASE_*,
 # and ENV are all available without manually sourcing .env. `override=True`
 # ensures .env values take precedence over any pre-existing environment vars
@@ -71,6 +80,7 @@ _EXPECTED_ROW_COUNTS = {
     "Returns": 2033,
     "People": 24,
 }
+
 
 
 # ---------------------------------------------------------------------------
@@ -158,6 +168,17 @@ def _info(msg: str) -> None:
 # ---------------------------------------------------------------------------
 # Commands
 # ---------------------------------------------------------------------------
+def _infer_orders_table_def() -> TableDef:
+    """Infer the Orders table definition from the canonical workbook."""
+    if not _DEFAULT_SOURCE.exists():
+        _err(f"Source workbook not found: {_DEFAULT_SOURCE}")
+    tables, _ = explore_workbook(_DEFAULT_SOURCE)
+    table_defs = infer_table_defs(tables)
+    orders_def = next((td for td in table_defs if td.name == "Orders"), None)
+    if orders_def is None:
+        _err("Orders table not found in inferred schema.")
+    return orders_def
+
 
 def cmd_bootstrap(source_file: str | None = None) -> None:
     """bootstrap: bring up PostgreSQL, run EDA, create schema, load data, write manifest."""
@@ -203,6 +224,12 @@ def cmd_bootstrap(source_file: str | None = None) -> None:
     # that could mask data-quality issues.
     with PostgresRepository(config=config) as repo:
         load_results = load_workbook(src_path, repo, repo)
+        # Historic log of predict-sales calls (empty at bootstrap time —
+        # populated as predictions are made). Created up-front so it shows
+        # up in `validate`/`list_tables` immediately after bootstrap.
+        from src.mlops.predictions_store import ensure_predictions_table
+
+        ensure_predictions_table(repo)
 
     # --- Manifest provenance ---
     manifest = build_manifest(inference, load_results)
@@ -363,10 +390,46 @@ def cmd_ask(
       - `--session <id>` routes the generated card into a 'Session: <id>'
         dashboard within the 'Chat Sessions' collection (US3).
     """
+    response, viewer = _run_ask_pipeline(question, viewer_id, allow_full_access)
+
+    # --- Print results ---
+    if response.error:
+        print(f"Error: {response.error}")
+        sys.exit(1)
+
+    print(f"Question: {response.question.text}")
+    print(f"Viewer: {viewer_id or 'full_access_local_dev'} (regions: {list(viewer.regions)})")
+    print(f"Generated SQL: {response.generated_sql.sql}")
+    print(f"Validation: {'ACCEPTED' if response.validation.accepted else 'REJECTED'}")
+    if response.validation.reason:
+        print(f"  Reason: {response.validation.reason}")
+
+    if response.query_result is not None:
+        if response.query_result.error:
+            print(f"Execution error: {response.query_result.error}")
+            print(f"  SQL: {response.query_result.sql}")
+        else:
+            print(f"Rows ({response.query_result.row_count}):")
+            for row in response.query_result.rows:
+                print(f"  {row.data}")
+            print(f"Latency: {response.query_result.latency_ms}ms")
+
+
+def _run_ask_pipeline(
+    question: str,
+    viewer_id: str | None,
+    allow_full_access: bool,
+) -> tuple["TextToSqlResponse", "SemanticViewer"]:
+    """Shared setup for `ask` and `chart`: build + run the Text-to-SQL pipeline.
+
+    Factored out of `cmd_ask` so `cmd_chart` (v3.1 NL->chart) can reuse the
+    exact same governed, semantically-enriched pipeline instead of duplicating
+    ~150 lines of viewer resolution + prompt-context building.
+    """
     from src.ai_engineering.llm_client import LlmClient
     from src.ai_engineering.pipeline import TextToSqlPipeline
     from src.contracts.semantic_layer import SemanticViewer
-    from src.contracts.text_to_sql import LlmConfig, NLQuestion
+    from src.contracts.text_to_sql import LlmConfig, NLQuestion, TextToSqlResponse
     from src.data_engineering.semantic_layer.builder import SemanticLayerBuilder
     from src.data_engineering.semantic_layer.governed_provider import (
         build_governed_provider,
@@ -586,27 +649,253 @@ def cmd_ask(
         )
         response = pipeline.run(NLQuestion(text=question))
 
-    # --- Print results ---
+    return response, viewer
+
+
+def cmd_chart(
+    question: str,
+    viewer_id: str | None = None,
+    allow_full_access: bool = False,
+) -> None:
+    """chart: translate a natural-language request into a saved PNG chart.
+
+    v3.1: reuses the governed Text-to-SQL pipeline (`ask`) to fetch data,
+    then asks the LLM (via `src.ai_engineering.nl_chart`) to choose a chart
+    type + axis mapping from the returned columns, and renders it with
+    `src.reporting.chart_renderer` (matplotlib, Agg backend) to
+    `.artifacts/charts/`.
+    """
+    from src.ai_engineering.llm_client import LlmClient
+    from src.ai_engineering.nl_chart import ChartSpecAssistant
+    from src.contracts.text_to_sql import LlmConfig, NLQuestion
+    from src.reporting.chart_renderer import ChartRenderError, render_chart
+
+    response, viewer = _run_ask_pipeline(question, viewer_id, allow_full_access)
+
     if response.error:
-        print(f"Error: {response.error}")
+        _err(f"Text-to-SQL step failed: {response.error}")
+    if not response.validation.accepted:
+        _err(f"Generated SQL was rejected: {response.validation.reason}")
+    if response.query_result is None or response.query_result.error:
+        err_msg = response.query_result.error if response.query_result else "no result"
+        _err(f"Query execution failed: {err_msg}")
+
+    query_result = response.query_result
+    if not query_result.rows:
+        _err("The query returned 0 rows; nothing to chart.")
+
+    columns = sorted(query_result.rows[0].data.keys())
+    _info(f"Query returned {query_result.row_count} row(s) with columns: {columns}")
+
+    llm_config = LlmConfig.from_env()
+    llm_client = LlmClient(llm_config)
+    assistant = ChartSpecAssistant(llm_client=llm_client)
+    parse_result = assistant.parse(NLQuestion(text=question), columns)
+
+    if parse_result.spec is None:
+        _err(f"Could not derive a chart specification: {parse_result.error}")
+
+    print(
+        f"Chart spec: type={parse_result.spec.chart_type} "
+        f"x={parse_result.spec.x_field} y={parse_result.spec.y_field} "
+        f"aggregation={parse_result.spec.aggregation} title={parse_result.spec.title!r}"
+    )
+
+    try:
+        chart_result = render_chart(query_result, parse_result.spec)
+    except ChartRenderError as exc:
+        _err(str(exc))
+
+    print(f"Chart saved to: {chart_result.image_path}")
+    print(f"Data points plotted: {chart_result.point_count}")
+
+
+def cmd_predict_sales_nl(question: str, environment: str) -> None:
+    """predict-sales-nl: extract a prediction request from NL text and run it.
+
+    v3.1: uses `src.ai_engineering.nl_predict` (LLM JSON extraction, grounded
+    with the categorical vocabularies observed by the *promoted* model in
+    `environment`) to build a typed `PredictionInput`, then calls the exact
+    same `src.mlops.inference.predict_sales` used by the `predict-sales` CLI
+    command — the LLM never touches the model directly, it only fills in the
+    typed contract that the model already knows how to consume.
+    """
+    from src.ai_engineering.llm_client import LlmClient
+    from src.ai_engineering.nl_predict import PredictSalesAssistant
+    from src.contracts.text_to_sql import LlmConfig, NLQuestion
+    from src.mlops.inference import predict_sales
+    from src.mlops.registry import ArtifactRegistry, NoActiveModelError, RegistryError
+
+    try:
+        llm_config = LlmConfig.from_env()
+    except ValueError as exc:
+        _err(str(exc))
+
+    registry = ArtifactRegistry()
+    active_entry = registry.resolve_active_run(cast("Any", environment))
+    if active_entry is None:
+        _err(
+            f"No active model promoted in environment {environment!r}. "
+            "Run train-sales-model + promote-sales-model first."
+        )
+
+    model = registry.load_model(active_entry)
+    known_categories = cast(
+        "dict[str, list[str]]",
+        getattr(model, "_mlops_categorical_vocabularies", {}),
+    )
+
+    llm_client = LlmClient(llm_config)
+    assistant = PredictSalesAssistant(llm_client=llm_client, known_categories=known_categories)
+    parse_result = assistant.parse(NLQuestion(text=question))
+
+    if parse_result.prediction_input is None:
+        print("Could not extract a complete prediction request from the question.")
+        if parse_result.missing_fields:
+            print(f"Missing fields: {parse_result.missing_fields}")
+        if parse_result.clarification:
+            print(f"Assistant: {parse_result.clarification}")
         sys.exit(1)
 
-    print(f"Question: {response.question.text}")
-    print(f"Viewer: {viewer_id or 'full_access_local_dev'} (regions: {list(viewer.regions)})")
-    print(f"Generated SQL: {response.generated_sql.sql}")
-    print(f"Validation: {'ACCEPTED' if response.validation.accepted else 'REJECTED'}")
-    if response.validation.reason:
-        print(f"  Reason: {response.validation.reason}")
+    print(f"Parsed prediction input: {parse_result.prediction_input.model_dump(mode='json')}")
 
-    if response.query_result is not None:
-        if response.query_result.error:
-            print(f"Execution error: {response.query_result.error}")
-            print(f"  SQL: {response.query_result.sql}")
-        else:
-            print(f"Rows ({response.query_result.row_count}):")
-            for row in response.query_result.rows:
-                print(f"  {row.data}")
-            print(f"Latency: {response.query_result.latency_ms}ms")
+    repo: PostgresRepository | None
+    try:
+        repo = PostgresRepository(config=PostgresConfig.from_env())
+    except Exception:
+        repo = None
+
+    try:
+        result = predict_sales(registry, cast("Any", environment), parse_result.prediction_input, repo)
+    except (NoActiveModelError, RegistryError) as exc:
+        _err(str(exc))
+    except Exception as exc:
+        _err(f"predict-sales-nl failed: {exc}")
+    finally:
+        if repo is not None:
+            repo.close()
+
+    print(f"Predicted Sales: {result.predicted_sales}")
+    print(
+        f"Model: {result.model_name} (run_id={result.run_id}, environment={result.environment})"
+    )
+    print(f"used_fallback_encoding: {str(result.used_fallback_encoding).lower()}")
+    print(f"latency_ms: {result.latency_ms}")
+
+
+def cmd_train_sales_model() -> None:
+    """train-sales-model: train, compare, and persist both sales models."""
+    from src.mlops.registry import ArtifactRegistry, RegistryError
+    from src.mlops.training import train_sales_models
+
+    if not _docker_available():
+        _err("Docker is not running. Run `bootstrap` first to start the warehouse.")
+
+    orders_def = _infer_orders_table_def()
+    config = PostgresConfig.from_env()
+    registry = ArtifactRegistry()
+
+    try:
+        with PostgresRepository(config=config) as repo:
+            linear_entry, catboost_entry = train_sales_models(repo, orders_def, registry)
+    except (RegistryError, ValueError) as exc:
+        _err(str(exc))
+    except Exception as exc:
+        _err(f"train-sales-model failed: {exc}")
+
+    linear_metadata = registry.read_run_metadata(linear_entry)
+    catboost_metadata = registry.read_run_metadata(catboost_entry)
+
+    print("Model comparison (same test set, same split):")
+    print(f"{'model':<20} {'rmse':>12} {'mae':>12} {'r2':>12} {'training_ms':>12}")
+    print(f"{'-' * 20} {'-' * 12} {'-' * 12} {'-' * 12} {'-' * 12}")
+    print(
+        f"{linear_entry.model_name:<20} "
+        f"{linear_entry.metrics.rmse:>12.4f} "
+        f"{linear_entry.metrics.mae:>12.4f} "
+        f"{linear_entry.metrics.r2:>12.4f} "
+        f"{linear_metadata.training_duration_ms:>12}"
+    )
+    print(
+        f"{catboost_entry.model_name:<20} "
+        f"{catboost_entry.metrics.rmse:>12.4f} "
+        f"{catboost_entry.metrics.mae:>12.4f} "
+        f"{catboost_entry.metrics.r2:>12.4f} "
+        f"{catboost_metadata.training_duration_ms:>12}"
+    )
+
+    better = linear_entry if linear_entry.metrics.rmse <= catboost_entry.metrics.rmse else catboost_entry
+    print(f"Better RMSE: {better.model_name} (run_id={better.run_id})")
+    print("")
+    print("Persisted runs:")
+    print(f"  {linear_entry.model_name} -> .artifacts/mlops/models/{linear_entry.model_name}/{linear_entry.run_id}/")
+    print(f"  {catboost_entry.model_name} -> .artifacts/mlops/models/{catboost_entry.model_name}/{catboost_entry.run_id}/")
+
+
+def cmd_promote_sales_model(run_id: str, environment: str, force: bool = False) -> None:
+    """promote-sales-model: promote a persisted run into an environment."""
+    from src.mlops.registry import ArtifactRegistry, PromotionGateError, RegistryError, UnknownRunIdError
+
+    registry = ArtifactRegistry()
+    try:
+        record = registry.promote(
+            run_id=run_id,
+            environment=cast("Any", environment),
+            force_bypass_staging_gate=force,
+        )
+    except (PromotionGateError, RegistryError, UnknownRunIdError) as exc:
+        _err(str(exc))
+
+    if record.bypassed_staging_gate:
+        _info(
+            f"GOVERNANCE BYPASS: promoted run_id={run_id} directly to prod with --force."
+        )
+    print(
+        f"Promoted run_id={record.run_id} to env={record.environment} "
+        f"at {record.promoted_at.isoformat()} bypassed_staging_gate={str(record.bypassed_staging_gate).lower()}"
+    )
+
+
+def cmd_predict_sales(environment: str, input_payload: dict[str, str]) -> None:
+    """predict-sales: run inference with the model promoted in an environment."""
+    from pydantic import ValidationError
+
+    from src.contracts.mlops import PredictionInput
+    from src.mlops.inference import predict_sales
+    from src.mlops.registry import ArtifactRegistry, NoActiveModelError, RegistryError
+
+    try:
+        prediction_input = PredictionInput.model_validate(input_payload)
+    except ValidationError as exc:
+        _err(f"Invalid predict-sales input: {exc}")
+
+    registry = ArtifactRegistry()
+    # Best-effort: persist the prediction into the `Predictions` SQL table
+    # when PostgreSQL is reachable. If it isn't (e.g. offline/unit-test
+    # usage), fall back to inference without SQL persistence — the JSONL
+    # append-log in src/mlops/inference.py still records the call either way.
+    repo: PostgresRepository | None
+    try:
+        repo = PostgresRepository(config=PostgresConfig.from_env())
+    except Exception:
+        repo = None
+
+    try:
+        result = predict_sales(registry, cast("Any", environment), prediction_input, repo)
+    except (NoActiveModelError, RegistryError) as exc:
+        _err(str(exc))
+    except Exception as exc:
+        _err(f"predict-sales failed: {exc}")
+    finally:
+        if repo is not None:
+            repo.close()
+
+    print(f"Predicted Sales: {result.predicted_sales}")
+    print(
+        f"Model: {result.model_name} (run_id={result.run_id}, environment={result.environment})"
+    )
+    print(f"used_fallback_encoding: {str(result.used_fallback_encoding).lower()}")
+    print(f"latency_ms: {result.latency_ms}")
 
 
 def cmd_generate_semantic_layer() -> None:
@@ -1024,6 +1313,9 @@ _COMMANDS = {
     "metabase": None,  # v2.1 — subcommands dispatched in main()
     "ask": None,  # has special arg handling in main()
     "evaluate": None,  # has special arg handling in main()
+    "train-sales-model": None,
+    "promote-sales-model": None,
+    "predict-sales": None,
 }
 
 
@@ -1031,7 +1323,7 @@ def main(argv: list[str] | None = None) -> None:
     """CLI entrypoint: `python -m src.cli <command>`."""
     args = argv if argv is not None else sys.argv[1:]
     if not args or args[0] in ("-h", "--help"):
-        print("Usage: python -m src.cli.main {bootstrap|teardown|validate|generate-dictionary|generate-semantic-layer|ask|evaluate} [args]")
+        print("Usage: python -m src.cli.main {bootstrap|teardown|validate|generate-dictionary|generate-semantic-layer|ask|chart|evaluate|train-sales-model|promote-sales-model|predict-sales|predict-sales-nl} [args]")
         print("Commands:")
         print("  bootstrap [--source PATH]        Bring up PG, load data, write manifest")
         print("  teardown [--remove-volume]        Stop & remove container (and optionally volume)")
@@ -1045,7 +1337,18 @@ def main(argv: list[str] | None = None) -> None:
         print("                                       People table, or a custom viewer from")
         print("                                       viewers.yaml; --no-metabase skips Metabase;")
         print("                                       --session <id> groups cards under a dashboard)")
+        print("  chart <question> [--viewer <id>]   Translate a NL request into a saved PNG chart")
+        print("                                      (runs ask, then LLM picks chart type/axes,")
+        print("                                       renders to .artifacts/charts/)")
         print("  evaluate                           Run sanity-check evaluation (v1.1)")
+        print("  train-sales-model                  Train, compare, and persist both sales models")
+        print("  promote-sales-model --run-id ID --env {dev,staging,prod} [--force]")
+        print("                                      Promote a persisted run to an environment")
+        print("  predict-sales --env ENV --ship-mode ... --order-date YYYY-MM-DD")
+        print("                                      Predict sales using the promoted model")
+        print("  predict-sales-nl <question> --env ENV")
+        print("                                      LLM extracts the prediction inputs from a")
+        print("                                       natural-language question, then predicts")
         sys.exit(0 if args else 1)
 
     command = args[0]
@@ -1129,12 +1432,122 @@ def main(argv: list[str] | None = None) -> None:
             session_id=session_id,
         )
         return
+    if command == "chart":
+        # Same flag grammar as `ask`: --viewer <id>, --allow-full-access.
+        chart_viewer_id: str | None = None
+        chart_allow_full = False
+        chart_question_tokens: list[str] = []
+        i = 0
+        while i < len(rest):
+            tok = rest[i]
+            if tok in ("--viewer", "-v") and i + 1 < len(rest):
+                chart_viewer_id = rest[i + 1]
+                i += 2
+                continue
+            if tok == "--allow-full-access":
+                chart_allow_full = True
+                i += 1
+                continue
+            chart_question_tokens.append(tok)
+            i += 1
+        if not chart_question_tokens:
+            _err("Usage: python -m src.cli.main chart <question> [--viewer <id>]")
+        cmd_chart(
+            " ".join(chart_question_tokens),
+            viewer_id=chart_viewer_id,
+            allow_full_access=chart_allow_full,
+        )
+        return
+    if command == "predict-sales-nl":
+        nl_environment: str | None = None
+        nl_question_tokens: list[str] = []
+        i = 0
+        while i < len(rest):
+            tok = rest[i]
+            if tok == "--env" and i + 1 < len(rest):
+                nl_environment = rest[i + 1]
+                i += 2
+                continue
+            nl_question_tokens.append(tok)
+            i += 1
+        if not nl_question_tokens or nl_environment is None:
+            _err("Usage: python -m src.cli.main predict-sales-nl <question> --env <dev|staging|prod>")
+        if nl_environment not in {"dev", "staging", "prod"}:
+            _err(f"Invalid environment: {nl_environment!r}. Use dev|staging|prod.")
+        cmd_predict_sales_nl(" ".join(nl_question_tokens), nl_environment)
+        return
     if command == "evaluate":
         cmd_evaluate()
         return
+    if command == "train-sales-model":
+        cmd_train_sales_model()
+        return
+    if command == "promote-sales-model":
+        run_id: str | None = None
+        environment: str | None = None
+        force = False
+        i = 0
+        while i < len(rest):
+            tok = rest[i]
+            if tok == "--run-id" and i + 1 < len(rest):
+                run_id = rest[i + 1]
+                i += 2
+                continue
+            if tok == "--env" and i + 1 < len(rest):
+                environment = rest[i + 1]
+                i += 2
+                continue
+            if tok == "--force":
+                force = True
+                i += 1
+                continue
+            _err("Usage: python -m src.cli.main promote-sales-model --run-id <id> --env <dev|staging|prod> [--force]")
+        if run_id is None or environment is None:
+            _err("Usage: python -m src.cli.main promote-sales-model --run-id <id> --env <dev|staging|prod> [--force]")
+        if environment not in {"dev", "staging", "prod"}:
+            _err(f"Invalid environment: {environment!r}. Use dev|staging|prod.")
+        cmd_promote_sales_model(run_id, environment, force=force)
+        return
+    if command == "predict-sales":
+        predict_environment: str | None = None
+        payload: dict[str, str] = {}
+        expected_flags = {
+            "--ship-mode": "ship_mode",
+            "--segment": "segment",
+            "--region": "region",
+            "--market": "market",
+            "--product-id": "product_id",
+            "--sub-category": "sub_category",
+            "--category": "category",
+            "--quantity": "quantity",
+            "--discount": "discount",
+            "--order-date": "order_date",
+        }
+        i = 0
+        while i < len(rest):
+            tok = rest[i]
+            if tok == "--env" and i + 1 < len(rest):
+                predict_environment = rest[i + 1]
+                i += 2
+                continue
+            field_name = expected_flags.get(tok)
+            if field_name is not None and i + 1 < len(rest):
+                payload[field_name] = rest[i + 1]
+                i += 2
+                continue
+            _err("Usage: python -m src.cli.main predict-sales --env <dev|staging|prod> --ship-mode ... --order-date YYYY-MM-DD")
+        if predict_environment is None:
+            _err("predict-sales requires --env <dev|staging|prod>.")
+        if predict_environment not in {"dev", "staging", "prod"}:
+            _err(f"Invalid environment: {predict_environment!r}. Use dev|staging|prod.")
+        missing = [name for name in expected_flags.values() if name not in payload]
+        if missing:
+            _err(f"predict-sales is missing required flags for: {missing}")
+        cmd_predict_sales(predict_environment, payload)
+        return
     handler = _COMMANDS.get(command)
     if handler is None:
-        _err(f"Unknown command: {command!r}. Use bootstrap|teardown|validate.")
+        _err(f"Unknown command: {command!r}. Use bootstrap|teardown|validate|generate-dictionary|generate-semantic-layer|ask|chart|evaluate|train-sales-model|promote-sales-model|predict-sales|predict-sales-nl.")
 
     # Parse simple per-command args.
     if command == "bootstrap":
