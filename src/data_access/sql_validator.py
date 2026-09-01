@@ -121,6 +121,19 @@ def validate_sql(sql: str, table_def: TableDef) -> ValidationResult:
         "end", "join", "on", "inner", "left", "right", "outer", "full",
         "sum", "count", "avg", "min", "max", "now", "date", "extract",
         "year", "month", "day", "cast", "coalesce", "true", "false", "exists",
+        # PostgreSQL date/time/text functions that the LLM may generate
+        # (restored from main d1dd4e7 — lost in the PR #4 merge resolution):
+        "to_char", "to_date", "to_timestamp", "to_number",
+        "date_trunc", "date_part", "date_add", "date_sub",
+        "make_date", "make_interval", "age", "interval",
+        "current_date", "current_timestamp", "current_time",
+        "trunc", "round", "ceil", "floor", "abs", "sqrt", "power",
+        "lower", "upper", "length", "substring", "substr", "trim",
+        "concat", "replace", "position", "left", "right",
+        "greatest", "least", "nullif",
+        "string_agg", "array_agg", "bool_or", "bool_and",
+        "stddev", "variance", "median", "percentile_cont", "percentile_disc",
+        "row_number", "rank", "dense_rank", "over", "partition",
     }
     target_lower = table_def.name.lower()
     identifiers = _extract_identifiers(normalized)
