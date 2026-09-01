@@ -390,7 +390,13 @@ def cmd_ask(
       - `--session <id>` routes the generated card into a 'Session: <id>'
         dashboard within the 'Chat Sessions' collection (US3).
     """
-    response, viewer = _run_ask_pipeline(question, viewer_id, allow_full_access)
+    response, viewer = _run_ask_pipeline(
+        question,
+        viewer_id,
+        allow_full_access,
+        metabase_enabled=metabase_enabled,
+        session_id=session_id,
+    )
 
     # --- Print results ---
     if response.error:
@@ -419,12 +425,18 @@ def _run_ask_pipeline(
     question: str,
     viewer_id: str | None,
     allow_full_access: bool,
+    metabase_enabled: bool = False,
+    session_id: str | None = None,
 ) -> tuple["TextToSqlResponse", "SemanticViewer"]:
     """Shared setup for `ask` and `chart`: build + run the Text-to-SQL pipeline.
 
     Factored out of `cmd_ask` so `cmd_chart` (v3.1 NL->chart) can reuse the
     exact same governed, semantically-enriched pipeline instead of duplicating
     ~150 lines of viewer resolution + prompt-context building.
+
+    v2.1 Metabase publication (`on_query_complete` card creation) only runs
+    when `metabase_enabled=True` — `cmd_ask` passes its flag through, while
+    `chart` / `predict-sales-nl` keep the default (no cards for internal runs).
     """
     from src.ai_engineering.llm_client import LlmClient
     from src.ai_engineering.pipeline import TextToSqlPipeline
