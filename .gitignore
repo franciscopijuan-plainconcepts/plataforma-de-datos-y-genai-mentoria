@@ -64,3 +64,7 @@ desktop.ini
 .artifacts/mlops/predict_sales.log
 .artifacts/mlops/registry.json
 
+# --- Metabase local state cache (feature 004) ---
+# `metabase setup` writes the latest known state (admin email, db_id,
+# collection_id, version) here for idempotency. Regeneratable via the CLI.
+.artifacts/metabase_state.json

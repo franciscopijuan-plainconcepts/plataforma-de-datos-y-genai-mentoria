@@ -11,12 +11,23 @@ Guia de continuidad para el equipo sobre como usamos Spec Kit en este proyecto, 
 
 ## Resumen de lo que ya hicimos con Spec Kit
 
-Se ejecutaron cuatro features completas con Spec Kit:
+Se ejecutaron cinco features completas con Spec Kit:
 
 1. **Feature 001 (`data-genai-platform-baseline`)** — v0 baseline: PostgreSQL en Docker, data dictionary, CLI bootstrap/teardown/validate/generate-dictionary, contratos tipados, tests de contrato e integracion.
 2. **Feature 002 (`text-to-sql-v1`)** — v1.0/v1.1: pipeline NL→SQL sobre Orders via Forge proxy, `ask` + `evaluate` CLI, logging estructurado, sanity-check de ~10 preguntas.
-3. **Feature 003 (`semantic-layer-v1`)** — v2.0: Semantic Layer con métricas/dimensiones/relaciones + RLS por `Region` usando `People`. Satisface constitution Principle IV por primera vez.
-4. **Feature 004 (`sales-prediction-model`)** — v3.0: dominio `src/mlops/` aislado con `train-sales-model`, artifact registry `.artifacts/mlops/registry.json`, staged promotion (`promote-sales-model`) e inferencia (`predict-sales`), con historial de predicciones persistido en una tabla SQL `Predictions` (Amendment 2026-08-26).
+3. **Feature 003 (`semantic-layer-v1`)** — v2.0: Semantic Layer con métricas, dimensiones, relaciones + RLS por `Region` usando `People` como mapping viewer→regions. Satisface constitution Principle IV por primera vez.
+   - `GovernedQueryProvider` decorator enforcea RLS en cada `execute_readonly_query`.
+   - `PeopleViewerResolver` (login-as-person): `--viewer marilene_rousseau` resuelve desde la tabla People (3 formas: snake_case, nombre con acentos, sin acentos). `viewers.yaml` queda solo como fallback para escape hatches.
+   - `SemanticLayerDocument` artifact regenerable y determinista (8 métricas, 11 dimensiones, 2 relaciones).
+   - CLI: `generate-semantic-layer`, `ask --viewer <persona>`, `ask --allow-full-access` (local/dev only).
+4. **Feature 004 (`metabase-integration`)** — v2.1: Metabase integration. Governed SQL cards from chat sessions; `scripts/metabase_bootstrap.py` hace setup automatico (PG role + admin user + DB connection + colleccion); `ask --session <id>` agrupa cards en dashboards; CLI operations `metabase setup|status|cards|teardown|reset-cards`.
+   - `MetabaseClient` (`src/ai_engineering/metabase_client.py`) — ONLY module que importa httpx; boundary test enforced.
+   - `on_query_complete` callback en `TextToSqlPipeline` (generico; el pipeline no importa `metabase_client` directamente).
+   - `metabase_readonly` PG role (SELECT-only, defense-in-depth para Principle IV).
+   - `load_dotenv(override=True)` en CLI — variables de .env siempre toman precedencia (no se necesita `ENV=local` como prefijo del comando).
+   - Fix: `SqlValidator` ahora acepta funciones PostgreSQL (`to_char`, `date_trunc`, `round`, etc.).
+5. **Feature 005 (`sales-prediction-model`)** — v3.0: dominio `src/mlops/` aislado con `train-sales-model`, artifact registry `.artifacts/mlops/registry.json`, staged promotion (`promote-sales-model`) e inferencia (`predict-sales`), con historial de predicciones persistido en una tabla SQL `Predictions` (Amendment 2026-08-26).
+   - Nota de continuidad: el directorio real sigue siendo `specs/004-sales-prediction-model/` por una colision historica de numeracion entre ramas; en narrativa de roadmap lo tratamos como la quinta feature entregada.
 
 Cada feature siguio el flujo completo: constitution (solo 001), spec, plan + research + data-model + contracts + quickstart, tasks, implement por fases, validacion. La feature 003 introdujo:
 - `src/data_engineering/semantic_layer/` subpaquete (builder, resolver, governed_provider, registry, metrics, render).
@@ -41,7 +52,7 @@ Para la feature 001, el detalle del flujo abajo se mantiene como referencia:
 - [specs/001-data-genai-platform-baseline/quickstart.md](specs/001-data-genai-platform-baseline/quickstart.md)
 5. Tareas accionables generadas y cerradas en [specs/001-data-genai-platform-baseline/tasks.md](specs/001-data-genai-platform-baseline/tasks.md).
 
-Resultado: la plataforma ya recorrió cuatro features completas y cubre Data Engineering + AI Engineering + Semantic Governance + MLOps local reproducible.
+Resultado: la plataforma ya recorrió cinco features completas y cubre Data Engineering + AI Engineering + Semantic Governance + Metabase self-service + MLOps local reproducible.
 
 ## Estructura OpenSpec en este repo
 
@@ -60,6 +71,8 @@ Resultado: la plataforma ya recorrió cuatro features completas y cubre Data Eng
 
 - [specs](specs): contiene una carpeta por feature.
 - [specs/001-data-genai-platform-baseline](specs/001-data-genai-platform-baseline): feature baseline ya completada.
+- [specs/002-text-to-sql-v1](specs/002-text-to-sql-v1), [specs/003-semantic-layer-v1](specs/003-semantic-layer-v1), [specs/004-metabase-integration](specs/004-metabase-integration) y [specs/004-sales-prediction-model](specs/004-sales-prediction-model): siguientes iteraciones ya cerradas; la ultima corresponde cronologicamente a la feature 005 aunque el path quedo con prefijo 004 por la numeracion paralela de ramas.
+- En cada carpeta de feature:
   - spec.md: que problema resolvemos, alcance, requisitos funcionales, criterios de exito.
   - plan.md: arquitectura, contexto tecnico, chequeo constitucional, estructura objetivo.
   - research.md: decisiones tecnicas y findings de EDA.

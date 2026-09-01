@@ -29,6 +29,41 @@ services:
       retries: 10
       start_period: 10s
 
+  # ---------------------------------------------------------------------------
+  # Metabase (feature 004-metabase-integration, v2.1).
+  # Local visualization layer for governed SQL cards produced by the
+  # Text-to-SQL pipeline. Setup is automated via `metabase setup` (REST API).
+  # Governance NON-NEGOTIABLE (constitution Principle IV) is preserved: cards
+  # store ALREADY-GOVERNED SQL (post-GovernedQueryProvider, RLS injected).
+  # Pinned to a major+minor tag (research.md Part B) for API stability.
+  # ---------------------------------------------------------------------------
+  metabase:
+    image: metabase/metabase:v0.58-lts
+    container_name: plataforma_metabase
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      # Metabase uses H2 (file-based) for its own metadata. Volume below
+      # persists it. The PostgreSQL warehouse connection is set up via API
+      # in `metabase setup`, NOT here (keeps the compose simple + reproducible).
+      MB_DB_TYPE: h2
+      MB_DB_FILE: /metabase-data/metabase.db
+      MB_JETTY_PORT: "3000"
+    ports:
+      - "${METABASE_PORT:-3000}:3000"
+    volumes:
+      - plataforma_metabase_data:/metabase-data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:3000/api/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+
 volumes:
   plataforma_pgdata:
     name: plataforma_pgdata
+  plataforma_metabase_data:
+    name: plataforma_metabase_data

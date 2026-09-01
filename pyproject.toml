@@ -57,10 +57,6 @@ ignore_missing_imports = true
 module = "psycopg.*"
 ignore_missing_imports = true
 
-[[tool.mypy.overrides]]
-module = "yaml.*"
-ignore_missing_imports = true
-
 # numpy's bundled stubs use syntax that requires a recent mypy/python combo;
 # we never import numpy directly (only via pandas), so its stubs are safe to skip.
 [[tool.mypy.overrides]]

@@ -4,21 +4,40 @@ Documento vivo para seguimiento del estado actual, decisiones clave, riesgos y s
 
 ## Estado actual (snapshot)
 
-- Fecha de actualizacion: 2026-08-25
-- Branch principal: main (feature implementada en `004-sales-prediction-model`)
-- Estado global: v3.0 MLOps implementado y validado
+- Fecha de actualizacion: 2026-09-01
+- Branch principal: main (roadmap convergido hasta Metabase v2.1 + Sales Prediction MLOps v3.0)
+- Estado global: v3.0 implementado y validado
 - Ambito completado:
   - Warehouse local PostgreSQL en Docker (v0 baseline)
   - Ingestion desde Global Superstore Data.xlsx (v0)
   - Data dictionary generado y versionado (v0)
-  - CLI baseline: bootstrap, teardown, validate, generate-dictionary (v0)
-  - Text-to-SQL v1.0/v1.1: `ask`, `evaluate`, validator SQL, logging estructurado
-  - Semantic Layer v2.0: artifact determinista + `generate-semantic-layer` + RLS por `Region`
-  - Viewer-based governance: `ask --viewer <id>` + `--allow-full-access` (local/dev only)
-  - Dominio `src/ai_engineering/` completo y boundaries reforzados
-  - **MLOps v3.0**: dominio `src/mlops/` aislado con feature engineering compartido, split cronológico, `LinearRegression` + `CatBoostRegressor`, artifact registry filesystem-based, staged promotion, inferencia y logging de predicción
-  - Nuevos comandos CLI v3.0: `train-sales-model`, `promote-sales-model`, `predict-sales`
-  - Nuevos contratos tipados en `src/contracts/mlops.py` (Pydantic v2 frozen)
+  - CLI operativa baseline: bootstrap, teardown, validate, generate-dictionary (v0)
+  - Contratos tipados, boundaries y tests de integracion (v0)
+  - Text-to-SQL v1.0: pipeline NL → LLM → SQL validado → ejecucion → resultados tipados (v1.0)
+  - Text-to-SQL v1.1: logging estructurado + sanity-check evaluation (~10 preguntas) (v1.1)
+  - Nuevos comandos CLI v1.x: `ask <question>` y `evaluate` (v1.0/v1.1)
+  - Dominio `src/ai_engineering/` (llm_client, prompt_builder, sql_validator, pipeline, evaluation)
+  - `QueryProvider` Protocol extendido con `execute_readonly_query` (v1.0)
+  - **Semantic Layer v2.0**: `SemanticLayerDocument` (8 métricas, 11 dimensiones, 2 relaciones) regenerable como artifact determinista (v2.0)
+  - **RLS enforcement via `GovernedQueryProvider`**: ningún SQL del LLM bypassa `WHERE Region IN (viewer.regions)` (v2.0, constitution Principle IV satisfecha por primera vez)
+  - **Viewer-based governance**: `viewers.yaml` + `ask --viewer <id>` + `--allow-full-access` (local/dev only) (v2.0)
+  - **Prompt enrichment**: `PromptBuilder` ahora incluye bloque condensado de métricas/dimensiones/joins cuando el Semantic Layer está cargado (v2.0)
+  - Nuevos comandos CLI v2.0: `generate-semantic-layer`, `ask --viewer <id>` (v2.0)
+  - Logging extendido con `viewer_id`, `regions`, `gov_bypass` flag en `.artifacts/text_to_sql.log` (v2.0, FR-021)
+  - Subpaquete nuevo `src/data_engineering/semantic_layer/` con builder, resolver, governed_provider, registry, metrics, render, person_resolver (v2.0)
+  - Contratos nuevos en `src/contracts/semantic_layer.py` (Pydantic v2 frozen) (v2.0)
+  - **Metabase Integration v2.1**: servicio de Metabase local en Docker que visualiza como cards/dashboards las consultas SQL gobernadas generadas por el pipeline (v2.1)
+  - **Governed SQL Cards**: al final de cada `ask --viewer <id>` exitoso, se crea automaticamente una card en Metabase con el SQL ya gobernado (v2.1)
+  - **Metabase bootstrap script**: `scripts/metabase_bootstrap.py` hace setup automatico (PG role + admin user + DB connection + colleccion + state) — idempotente (v2.1)
+  - **Login-as-person**: `PeopleViewerResolver` resuelve el viewer desde la tabla People directamente (snake_case ID, nombre con acentos, o sin acentos) — sin necesidad de viewers.yaml para personas reales (v2.1)
+  - **CLI**: `metabase setup|status|cards|teardown|reset-cards`; `ask --no-metabase`; `ask --session <id>` (v2.1)
+  - Modulos nuevos: `src/ai_engineering/metabase_client.py` (ONLY httpx import), `src/data_access/adapters/postgres/roles.py`, `src/contracts/metabase.py` (v2.1)
+  - `on_query_complete` callback en `TextToSqlPipeline` (generico; no acopla Metabase al pipeline core) (v2.1)
+  - `load_dotenv` con `override=True` en CLI — variables de .env siempre toman precedencia (v2.1)
+  - Fix: `SqlValidator` ahora acepta funciones PostgreSQL (`to_char`, `date_trunc`, `round`, etc.) (v2.1)
+  - **MLOps v3.0**: dominio `src/mlops/` aislado con feature engineering compartido, split cronológico, `LinearRegression` + `CatBoostRegressor`, artifact registry filesystem-based, staged promotion, inferencia y logging de predicción (v3.0)
+  - Nuevos comandos CLI v3.0: `train-sales-model`, `promote-sales-model`, `predict-sales` (v3.0)
+  - Nuevos contratos tipados en `src/contracts/mlops.py` (Pydantic v2 frozen) (v3.0)
 
 ## Evidencias de completitud
 
@@ -26,13 +45,17 @@ Documento vivo para seguimiento del estado actual, decisiones clave, riesgos y s
   - [data_dictionary.md](data_dictionary.md)
   - [.artifacts/load_manifest.json](.artifacts/load_manifest.json)
   - [.artifacts/semantic_layer.json](.artifacts/semantic_layer.json)
+  - `.artifacts/metabase_state.json` (runtime-generated state cache para bootstrap/status)
   - `.artifacts/mlops/registry.json` (runtime-generated, no committed)
+  - `.artifacts/mlops/predict_sales.log` (runtime-generated inference log)
 - Especificacion y trazabilidad:
   - [specs/001-data-genai-platform-baseline/spec.md](specs/001-data-genai-platform-baseline/spec.md)
   - [specs/002-text-to-sql-v1/spec.md](specs/002-text-to-sql-v1/spec.md)
   - [specs/003-semantic-layer-v1/spec.md](specs/003-semantic-layer-v1/spec.md)
+  - [specs/004-metabase-integration/spec.md](specs/004-metabase-integration/spec.md)
   - [specs/004-sales-prediction-model/spec.md](specs/004-sales-prediction-model/spec.md)
 - Tareas:
+  - Todas las tareas de Metabase integration marcadas como completadas en [specs/004-metabase-integration/tasks.md](specs/004-metabase-integration/tasks.md)
   - Todas las tareas T001-T039 marcadas como completadas en [specs/004-sales-prediction-model/tasks.md](specs/004-sales-prediction-model/tasks.md)
 
 ## Cobertura implementada vs roadmap
@@ -57,6 +80,13 @@ Documento vivo para seguimiento del estado actual, decisiones clave, riesgos y s
 - `GovernedQueryProvider` con RLS por `Region` enforced en el path NL→SQL.
 - `viewers.yaml` local-only + resolución de viewers desde `People`.
 
+### Entregado en v2.1 (hecho)
+
+- Metabase local en Docker para visualizar como cards/dashboards las consultas SQL ya gobernadas.
+- `scripts/metabase_bootstrap.py` idempotente para health check, admin setup, DB connection, collection y role `metabase_readonly`.
+- `ask --session <id>` para agrupar cards en dashboards y `ask --no-metabase` para saltar la publicación cuando conviene.
+- `MetabaseClient` aislado en `src/ai_engineering/metabase_client.py`, manteniendo el boundary de `httpx` en un solo módulo.
+
 ### Entregado en v3.0 (hecho)
 
 - `train-sales-model`: extrae `Orders` vía `QueryProvider`, deriva features, hace split cronológico, entrena y compara `linear_regression` vs `catboost`.
@@ -78,6 +108,7 @@ Documento vivo para seguimiento del estado actual, decisiones clave, riesgos y s
 - Calidad validada:
   - `uv run pytest tests/ -x` → 160 passed, 2 skipped
   - `uv run mypy --strict src/mlops src/contracts/mlops.py src/cli/main.py tests/` → 0 errores
+  - Metabase quedó validado por su bootstrap idempotente, boundary tests dedicados y la publicación automática de governed SQL cards desde `ask`.
 
 ## Riesgos y puntos de atencion
 
@@ -103,6 +134,7 @@ Mitigada en v2.0 por el Semantic Layer, pero la calidad de prompts/metricas sigu
 3. Resolver el mismatch `People.Region` vs `Orders.Region` heredado del Semantic Layer.
 4. Diseñar RBAC column-level y audit logging persistente si la plataforma pasa de CLI local a servicio compartido.
 5. Mantener reproducibilidad con gates de CI sobre `pytest` + `mypy --strict`.
+6. Consolidar la convivencia del doble `specs/004-*` en un proximo cleanup documental o de renombrado planificado.
 
 ## Backlog de seguimiento (editable)
 
@@ -110,10 +142,12 @@ Mitigada en v2.0 por el Semantic Layer, pero la calidad de prompts/metricas sigu
 |---|---|---|---|---|---|
 | M0 | v0 Baseline (warehouse + dictionary) | Completado | - | 2026-08-04 | Local PostgreSQL + data dictionary + CLI |
 | M1 | v1.0 Text-to-SQL sobre Orders | Completado | - | 2026-08-11 | Pipeline NL→SQL→resultados tipados |
-| M2 | v1.1 Hardening + Evaluation | Completado | - | 2026-08-11 | Logging + sanity-check |
-| M3 | v2.0 Semantic Layer + RLS Governance | Completado | - | 2026-08-17 | SemanticLayerDocument + GovernedQueryProvider |
-| M4 | v3.0 Sales Prediction Model (MLOps) | Completado | - | 2026-08-25 | Training + registry + promotion + inference |
+| M2 | v1.1 Hardening + Evaluation | Completado | - | 2026-08-11 | Logging + sanity-check (~10 preguntas) |
+| M3 | v2.0 Semantic Layer + RLS Governance | Completado | - | 2026-08-17 | SemanticLayerDocument + GovernedQueryProvider (RLS enforced, Principle IV satisfied) |
+| M3.1 | v2.1 Metabase Integration | Completado | - | 2026-08-20 | Metabase + governed SQL cards + sessions + CLI ops + metabase_bootstrap.py |
+| M4 | v3.0 Sales Prediction Model (MLOps) | Completado | - | 2026-08-25 | Training + registry + promotion + inference + prediction history |
 | M5 | v3.1 MLOps Observability + Governance hardening | Pendiente | TBD | TBD | Drift monitoring, approval flow, training-path governance review |
+| M6 | v3.2 RBAC column-level + People.Region taxonomy + Audit | Pendiente | TBD | TBD | Resolución de mismatch Canada; auth real; audit persistente |
 
 ## Rutina de mantenimiento de este documento
 
@@ -139,17 +173,18 @@ Siguiente paso:
 Fecha: 2026-08-25  
 Bloque cerrado: Feature 004 `sales-prediction-model`  
 Cambio principal: se entrego el dominio `src/mlops/` con training reproducible, staged promotion e inferencia CLI.  
-Impacto: milestone M4 completado; la plataforma ya cubre Data Engineering + AI Engineering + MLOps.  
+Impacto: milestone M4 completado; la plataforma ya cubre Data Engineering + AI Engineering + Metabase self-service + MLOps.  
 Siguiente paso: definir v3.1 para drift/monitoring y revisar gobernanza del training path batch.
 
 ## Onboarding rapido para continuar desde aqui
 
 1. Leer [README.md](README.md).
 2. Leer [README_SPECKIT.md](README_SPECKIT.md).
-3. Revisar [specs/004-sales-prediction-model](specs/004-sales-prediction-model).
+3. Revisar [specs/004-metabase-integration](specs/004-metabase-integration) y [specs/004-sales-prediction-model](specs/004-sales-prediction-model).
 4. Ejecutar validacion local:
    - uv sync
    - uv run python -m src.cli.main bootstrap
    - uv run python -m src.cli.main validate
+   - uv run python scripts/metabase_bootstrap.py
    - uv run python -m src.cli.main train-sales-model
 5. Proponer siguiente feature con Spec Kit y registrar avance en este archivo.
