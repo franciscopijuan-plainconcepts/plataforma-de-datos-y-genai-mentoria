@@ -87,6 +87,10 @@ def validate_sql(sql: str, table_def: TableDef) -> ValidationResult:
     column_aliases: set[str] = set()
     for match in re.finditer(r"\bas\s+([a-z_][a-z0-9_]*)", sql_lower):
         column_aliases.add(match.group(1))
+    # Also accept QUOTED aliases, e.g. `SUM("Sales") AS "gross_sales"` — the
+    # LLM sometimes quotes them and they were being rejected as unknown columns.
+    for match in re.finditer(r'\bas\s+"([^"]+)"', sql_lower):
+        column_aliases.add(match.group(1))
 
     for ref in table_refs:
         if ref == "people":
@@ -117,6 +121,19 @@ def validate_sql(sql: str, table_def: TableDef) -> ValidationResult:
         "end", "join", "on", "inner", "left", "right", "outer", "full",
         "sum", "count", "avg", "min", "max", "now", "date", "extract",
         "year", "month", "day", "cast", "coalesce", "true", "false", "exists",
+        # PostgreSQL date/time/text functions that the LLM may generate
+        # (restored from main d1dd4e7 — lost in the PR #4 merge resolution):
+        "to_char", "to_date", "to_timestamp", "to_number",
+        "date_trunc", "date_part", "date_add", "date_sub",
+        "make_date", "make_interval", "age", "interval",
+        "current_date", "current_timestamp", "current_time",
+        "trunc", "round", "ceil", "floor", "abs", "sqrt", "power",
+        "lower", "upper", "length", "substring", "substr", "trim",
+        "concat", "replace", "position", "left", "right",
+        "greatest", "least", "nullif",
+        "string_agg", "array_agg", "bool_or", "bool_and",
+        "stddev", "variance", "median", "percentile_cont", "percentile_disc",
+        "row_number", "rank", "dense_rank", "over", "partition",
     }
     target_lower = table_def.name.lower()
     identifiers = _extract_identifiers(normalized)
