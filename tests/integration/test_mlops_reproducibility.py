@@ -31,12 +31,22 @@ pytestmark = pytest.mark.skipif(
 
 
 def _run_cli(*args: str) -> subprocess.CompletedProcess[str]:
+    # SEED_SALES_PREDICTIONS=false: this test asserts an EXACT registry run
+    # count after `bootstrap` + `train-sales-model`. `bootstrap` best-effort
+    # auto-trains+promotes a model (v3.1 seeding amendment) when no model is
+    # active yet, which would add extra run(s) and break the exact-count
+    # assertion below — disable it here since this test is about
+    # `train-sales-model`'s own reproducibility, not the seeder.
+    import os
+
+    env = {**os.environ, "SEED_SALES_PREDICTIONS": "false"}
     result = subprocess.run(
         ['uv', 'run', 'python', '-m', 'src.cli.main', *args],
         cwd=str(_REPO_ROOT),
         capture_output=True,
         text=True,
         timeout=1200,
+        env=env,
     )
     if result.returncode != 0:
         pytest.fail(f"Command {' '.join(args)} failed:\nstdout={result.stdout}\nstderr={result.stderr}")

@@ -110,6 +110,7 @@ class TextToSqlPipeline:
         semantic_layer: SemanticLayerDocument | None = None,
         viewer: SemanticViewer | None = None,
         on_query_complete: OnQueryComplete | None = None,
+        extra_tables: dict[str, TableDef] | None = None,
     ) -> None:
         self._dictionary = dictionary
         self._table_def = table_def
@@ -129,6 +130,12 @@ class TextToSqlPipeline:
         # callback receives `response.query_result.sql` (governed) so sinks
         # like Metabase preserve Principle IV NON-NEGOTIABLE by design.
         self._on_query_complete = on_query_complete
+        # v3.2 (004-sales-prediction-model amendment): optional extra
+        # queryable tables (e.g. `{"predictions": predictions_table_def()}`)
+        # that are NOT the pipeline's primary `table_def` but the LLM may
+        # still reference on their own. Threaded into both `build_prompt`
+        # (schema visibility) and `validate_sql` (table/column allowlisting).
+        self._extra_tables = extra_tables
 
     def run(self, question: NLQuestion) -> TextToSqlResponse:
         """Run the full Text-to-SQL pipeline for a single question.
@@ -142,6 +149,7 @@ class TextToSqlPipeline:
             dictionary=self._dictionary,
             table_def=self._table_def,
             semantic_layer=self._semantic_layer,
+            extra_tables=self._extra_tables,
         )
 
         # 2. Call the LLM.
@@ -163,7 +171,7 @@ class TextToSqlPipeline:
             return response
 
         # 3. Validate the SQL.
-        validation = validate_sql(generated.sql, self._table_def)
+        validation = validate_sql(generated.sql, self._table_def, self._extra_tables)
 
         if not validation.accepted:
             _logger.info(

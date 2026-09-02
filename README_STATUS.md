@@ -4,9 +4,9 @@ Documento vivo para seguimiento del estado actual, decisiones clave, riesgos y s
 
 ## Estado actual (snapshot)
 
-- Fecha de actualizacion: 2026-09-01
-- Branch principal: main (roadmap convergido hasta Metabase v2.1 + Sales Prediction MLOps v3.0)
-- Estado global: v3.0 implementado y validado
+- Fecha de actualizacion: 2026-09-02
+- Branch principal: feature/diego/ml-dashboard (roadmap convergido hasta Metabase v2.1 + Sales Prediction MLOps v3.0 + Batch Forecast Seeding v3.1)
+- Estado global: v3.0 implementado y validado; v3.1 (batch forecast seeding, sin LLM) implementado y validado end-to-end
 - Ambito completado:
   - Warehouse local PostgreSQL en Docker (v0 baseline)
   - Ingestion desde Global Superstore Data.xlsx (v0)
@@ -38,6 +38,8 @@ Documento vivo para seguimiento del estado actual, decisiones clave, riesgos y s
   - **MLOps v3.0**: dominio `src/mlops/` aislado con feature engineering compartido, split cronológico, `LinearRegression` + `CatBoostRegressor`, artifact registry filesystem-based, staged promotion, inferencia y logging de predicción (v3.0)
   - Nuevos comandos CLI v3.0: `train-sales-model`, `promote-sales-model`, `predict-sales` (v3.0)
   - Nuevos contratos tipados en `src/contracts/mlops.py` (Pydantic v2 frozen) (v3.0)
+  - **Batch forecast seeding v3.1 (sin LLM)**: `src/mlops/seed_predictions.py` entrena/promueve un modelo automáticamente (solo la primera vez) y siembra la tabla `Predictions` con forecasts deterministas de los próximos meses; se ejecuta automáticamente al final de `bootstrap` (best-effort, idempotente) para que los dashboards de Metabase tengan datos sin depender de una llamada en vivo al LLM/modelo (v3.1)
+  - Nuevo comando CLI v3.1: `seed-sales-predictions [--env] [--months-ahead] [--force]` (re-siembra manual) (v3.1)
 
 ## Evidencias de completitud
 
@@ -95,6 +97,14 @@ Documento vivo para seguimiento del estado actual, decisiones clave, riesgos y s
 - `promote-sales-model`: staged promotion `dev/staging/prod`, rechazo de direct-to-prod salvo `--force`, historial completo preservado.
 - `predict-sales`: inferencia sobre modelo promovido, fallback explícito para categorías no vistas, logging en `.artifacts/mlops/predict_sales.log`. *(Amendment 2026-08-26)* además persiste cada predicción (valor predicho, fecha/hora, run_id/modelo/ambiente y todos los parámetros de input) como fila en una nueva tabla SQL `Predictions` (creada por `bootstrap`).
 
+### Entregado en v3.1 (hecho)
+
+- **Decisión de diseño**: generar "Sales predicho para los próximos meses" para un dashboard es una tarea batch, no un trigger del LLM a petición del cliente — el LLM nunca invoca el modelo directamente (Principle I); tanto `predict-sales-nl` (pregunta ad-hoc parseada por LLM) como este seeder batch pasan por la MISMA función tipada `predict_sales()`, pero para inputs de forecast deterministas no tiene sentido pagar latencia/costo/riesgo de fallo de LLM en tiempo de siembra.
+- `src/mlops/seed_predictions.py`: si no hay modelo promovido en el ambiente objetivo, entrena + promueve uno automáticamente (mejor RMSE, dev→staging→prod); extrae las 10 combinaciones `(Region, Category)` más frecuentes de `Orders` y construye un perfil "orden típica" por combinación (moda de campos categóricos restantes, mediana de `quantity`); predice `Sales` para cada perfil × los próximos N meses (default 6) y persiste cada predicción en `Predictions` vía el mismo `predict_sales()` de la CLI.
+- **Idempotente**: si el run activo ya tiene filas futuras en `Predictions`, la siembra se salta (sin duplicados en `bootstrap` repetidos).
+- Se ejecuta automáticamente al final de `bootstrap` (best-effort — nunca hace fallar el bootstrap); controlable con `SEED_SALES_PREDICTIONS`/`SEED_SALES_PREDICTIONS_ENV`/`SEED_SALES_PREDICTIONS_MONTHS` (`.env.example`).
+- Nuevo comando `seed-sales-predictions [--env] [--months-ahead] [--force]` para re-sembrar manualmente sin un `bootstrap` completo.
+
 ## Calidad tecnica actual
 
 - Arquitectura alineada con constitucion en [.specify/memory/constitution.md](.specify/memory/constitution.md).
@@ -146,7 +156,7 @@ Mitigada en v2.0 por el Semantic Layer, pero la calidad de prompts/metricas sigu
 | M3 | v2.0 Semantic Layer + RLS Governance | Completado | - | 2026-08-17 | SemanticLayerDocument + GovernedQueryProvider (RLS enforced, Principle IV satisfied) |
 | M3.1 | v2.1 Metabase Integration | Completado | - | 2026-08-20 | Metabase + governed SQL cards + sessions + CLI ops + metabase_bootstrap.py |
 | M4 | v3.0 Sales Prediction Model (MLOps) | Completado | - | 2026-08-25 | Training + registry + promotion + inference + prediction history |
-| M5 | v3.1 MLOps Observability + Governance hardening | Pendiente | TBD | TBD | Drift monitoring, approval flow, training-path governance review |
+| M5 | v3.1 MLOps Observability + Governance hardening | Parcial | - | TBD | Batch forecast seeding (`seed-sales-predictions`, auto en `bootstrap`) **Completado** 2026-09-02; drift monitoring, approval flow y training-path governance review siguen **Pendiente** |
 | M6 | v3.2 RBAC column-level + People.Region taxonomy + Audit | Pendiente | TBD | TBD | Resolución de mismatch Canada; auth real; audit persistente |
 
 ## Rutina de mantenimiento de este documento
@@ -176,6 +186,12 @@ Cambio principal: se entrego el dominio `src/mlops/` con training reproducible, 
 Impacto: milestone M4 completado; la plataforma ya cubre Data Engineering + AI Engineering + Metabase self-service + MLOps.  
 Siguiente paso: definir v3.1 para drift/monitoring y revisar gobernanza del training path batch.
 
+Fecha: 2026-09-02
+Bloque cerrado: Batch forecast seeding (v3.1, parcial de M5)
+Cambio principal: `src/mlops/seed_predictions.py` + comando CLI `seed-sales-predictions`, integrado en `bootstrap` (best-effort, idempotente). Decisión de diseño explícita: forecast de dashboard es batch/no-LLM, no un trigger on-demand del cliente vía LLM — reutiliza `predict_sales()` sin lógica paralela.
+Impacto: `Predictions` queda poblada con forecasts de los próximos 6 meses inmediatamente tras `uv run python -m src.cli.main bootstrap`, sin dependencia de Postgres/LLM en tiempo de vista del dashboard (verificado end-to-end: primera corrida siembra 60 filas, segunda corrida idempotente las salta, `seed-sales-predictions --force` re-siembra).
+Siguiente paso: drift monitoring, approval flow y training-path governance review siguen pendientes (resto de M5).
+
 ## Onboarding rapido para continuar desde aqui
 
 1. Leer [README.md](README.md).
@@ -183,8 +199,8 @@ Siguiente paso: definir v3.1 para drift/monitoring y revisar gobernanza del trai
 3. Revisar [specs/004-metabase-integration](specs/004-metabase-integration) y [specs/004-sales-prediction-model](specs/004-sales-prediction-model).
 4. Ejecutar validacion local:
    - uv sync
-   - uv run python -m src.cli.main bootstrap
+   - uv run python -m src.cli.main bootstrap   # ahora tambien entrena/promueve y siembra `Predictions` (v3.1, best-effort)
    - uv run python -m src.cli.main validate
    - uv run python scripts/metabase_bootstrap.py
-   - uv run python -m src.cli.main train-sales-model
+   - uv run python -m src.cli.main train-sales-model   # opcional: entrenar un run adicional manualmente
 5. Proponer siguiente feature con Spec Kit y registrar avance en este archivo.

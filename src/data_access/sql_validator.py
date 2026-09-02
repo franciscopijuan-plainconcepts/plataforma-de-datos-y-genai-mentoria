@@ -12,7 +12,6 @@ _FORBIDDEN_KEYWORDS: set[str] = {
     "insert", "update", "delete", "drop", "truncate", "alter", "create",
     "grant", "revoke", "copy", "pg_sleep", "vacuum", "commit", "rollback",
     "merge", "replace", "into", "set", "execute", "explain", "analyze",
-    "with",
 }
 
 _COMMENT_PATTERNS: list[str] = ["--", "/*", "*/"]
@@ -28,19 +27,63 @@ def _extract_identifiers(sql: str) -> set[str]:
     for value in quoted:
         ids.add(value.lower())
     sql_no_quoted = re.sub(r'"[^"]+"', ' ', sql)
+    # Strip single-quoted STRING LITERALS (e.g. 'Caribbean', it''s) too —
+    # without this, a WHERE "Region" = 'Caribbean' filter makes "caribbean"
+    # look like an unknown column reference and gets rejected (pre-existing
+    # bug, surfaced while adding Predictions support since forecast questions
+    # commonly filter on Region/Category string literals).
+    sql_no_quoted = re.sub(r"'(?:[^']|'')*'", " ", sql_no_quoted)
     for match in re.finditer(r"\b([a-z_][a-z0-9_]*)\b", sql_no_quoted.lower()):
         ids.add(match.group(1))
     return ids
 
 
-def validate_sql(sql: str, table_def: TableDef) -> ValidationResult:
+def validate_sql(
+    sql: str,
+    table_def: TableDef,
+    extra_tables: dict[str, TableDef] | None = None,
+) -> ValidationResult:
+    """Validate a single read-only SELECT SQL statement.
+
+    Args:
+        sql: the LLM-generated SQL to validate.
+        table_def: the PRIMARY table the pipeline is built for (e.g. Orders).
+            "Returns" is always allowed alongside it (hardcoded, pre-existing
+            behavior — Returns' own columns are never referenced directly by
+            the generated SQL, only via `Order ID`, which Orders already has).
+        extra_tables: OPTIONAL additional tables the LLM may query on their
+            own (e.g. `{"predictions": predictions_table_def()}`). Unlike
+            "Returns", these tables' OWN columns are also whitelisted (v3.2,
+            004-sales-prediction-model amendment) because they may expose
+            columns that don't exist on `table_def` (e.g. `Predicted Sales`).
+    """
     normalized = _normalize_sql(sql)
     if not normalized:
         return ValidationResult(accepted=False, reason="SQL is empty", sql=sql)
-    if not normalized.lower().startswith("select"):
+    normalized_lower_start = normalized.lower()
+    # v3.2: a read-only CTE (`WITH x AS (SELECT ...) SELECT ...`) is allowed
+    # in addition to a bare SELECT — needed for "compare actual vs predicted"
+    # style questions that aggregate Orders and Predictions separately before
+    # joining. `WITH RECURSIVE` is explicitly rejected (unbounded/recursive
+    # queries are a resource-exhaustion risk with no legitimate use case
+    # here), and any embedded write keyword is still caught below regardless
+    # of whether it's wrapped in a CTE.
+    if re.match(r"^with\s+recursive\b", normalized_lower_start):
         return ValidationResult(
             accepted=False,
-            reason="SQL must start with SELECT (non-SELECT statements are rejected)",
+            reason="SQL contains forbidden construct: WITH RECURSIVE",
+            sql=sql,
+        )
+    if not (
+        normalized_lower_start.startswith("select")
+        or normalized_lower_start.startswith("with")
+    ):
+        return ValidationResult(
+            accepted=False,
+            reason=(
+                "SQL must start with SELECT or a read-only WITH ... SELECT "
+                "(non-SELECT statements are rejected)"
+            ),
             sql=sql,
         )
 
@@ -84,6 +127,19 @@ def validate_sql(sql: str, table_def: TableDef) -> ValidationResult:
         }:
             table_aliases.add(match.group(2))
 
+    # CTE names, e.g. `WITH actual AS (...), predicted AS (...) SELECT ...` —
+    # these act as virtual tables at the outer query level (`FROM actual`),
+    # so they must NOT be checked against `allowed_tables` (they're not real
+    # tables, they're local to this statement). The `AS (` sequence together
+    # is a strong, low-false-positive signal: normal column aliasing never
+    # writes `AS (` (a column alias is a plain identifier, not a subquery).
+    cte_names: set[str] = set()
+    if sql_lower.startswith("with"):
+        for match in re.finditer(
+            r"(?:^with\s+|,\s*)([a-z_][a-z0-9_]*)\s+as\s*\(", sql_lower
+        ):
+            cte_names.add(match.group(1))
+
     column_aliases: set[str] = set()
     for match in re.finditer(r"\bas\s+([a-z_][a-z0-9_]*)", sql_lower):
         column_aliases.add(match.group(1))
@@ -91,6 +147,23 @@ def validate_sql(sql: str, table_def: TableDef) -> ValidationResult:
     # LLM sometimes quotes them and they were being rejected as unknown columns.
     for match in re.finditer(r'\bas\s+"([^"]+)"', sql_lower):
         column_aliases.add(match.group(1))
+
+    # Derived-table (subquery) aliases, e.g. `FROM (SELECT ... ) o` or
+    # `JOIN (SELECT ...) AS p ON ...` — needed for cross-table comparison
+    # queries (e.g. Orders vs Predictions actual-vs-forecast) where the LLM
+    # commonly aggregates each side in its own subquery and joins them by
+    # alias. Only look at the identifier right after a closing paren so we
+    # don't accidentally treat every function-call `)` as introducing an
+    # alias (function calls are never directly followed by a bare identifier
+    # in valid SQL, except in this exact derived-table position).
+    for match in re.finditer(r"\)\s+(?:as\s+)?([a-z_][a-z0-9_]*)\b", sql_lower):
+        candidate = match.group(1)
+        if candidate not in {
+            "where", "group", "order", "limit", "having", "join", "on",
+            "inner", "left", "right", "outer", "full", "as", "union", "and",
+            "or", "not",
+        }:
+            table_aliases.add(candidate)
 
     for ref in table_refs:
         if ref == "people":
@@ -104,16 +177,24 @@ def validate_sql(sql: str, table_def: TableDef) -> ValidationResult:
                 sql=sql,
             )
 
-    allowed_tables = {table_def.name.lower(), "returns"}
+    extra_tables = extra_tables or {}
+    allowed_tables = {table_def.name.lower(), "returns"} | {
+        name.lower() for name in extra_tables
+    } | cte_names
     for ref in table_refs:
         if ref not in allowed_tables:
+            allowed_names = ", ".join(
+                sorted({table_def.name, "Returns", *(t.name for t in extra_tables.values())})
+            )
             return ValidationResult(
                 accepted=False,
-                reason=f"SQL references table: {ref}, but only '{table_def.name}' or 'Returns' is allowed",
+                reason=f"SQL references table: {ref}, but only {allowed_names} is allowed",
                 sql=sql,
             )
 
     allowed_columns = {column.name.lower() for column in table_def.columns}
+    for extra_def in extra_tables.values():
+        allowed_columns |= {column.name.lower() for column in extra_def.columns}
     sql_keywords = {
         "select", "from", "where", "group", "by", "order", "limit", "having",
         "as", "and", "or", "not", "in", "is", "null", "like", "between",
@@ -121,6 +202,7 @@ def validate_sql(sql: str, table_def: TableDef) -> ValidationResult:
         "end", "join", "on", "inner", "left", "right", "outer", "full",
         "sum", "count", "avg", "min", "max", "now", "date", "extract",
         "year", "month", "day", "cast", "coalesce", "true", "false", "exists",
+        "with",
         # PostgreSQL date/time/text functions that the LLM may generate
         # (restored from main d1dd4e7 — lost in the PR #4 merge resolution):
         "to_char", "to_date", "to_timestamp", "to_number",
