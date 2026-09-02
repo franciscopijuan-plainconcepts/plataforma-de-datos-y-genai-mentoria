@@ -231,12 +231,52 @@ def cmd_bootstrap(source_file: str | None = None) -> None:
 
         ensure_predictions_table(repo)
 
+        # --- Seed future Sales predictions (v3.1, POC groundwork) ---
+        # Best-effort + non-fatal: bootstrap MUST still succeed (baseline
+        # warehouse ready) even if training/seeding fails for any reason
+        # (e.g. sklearn/catboost not installed yet, first `uv sync` still
+        # pending). Disable entirely with SEED_SALES_PREDICTIONS=false;
+        # re-run/force manually anytime with `seed-sales-predictions`.
+        if os.environ.get("SEED_SALES_PREDICTIONS", "true").lower() != "false":
+            _seed_sales_predictions(repo)
+
     # --- Manifest provenance ---
     manifest = build_manifest(inference, load_results)
     written = write_manifest(manifest, _MANIFEST_PATH)
     _info(f"Wrote load manifest to {written}")
 
     _info("Bootstrap complete. Run `validate` to confirm.")
+
+
+def _seed_sales_predictions(repo: PostgresRepository, force: bool = False) -> None:
+    """Best-effort: train/promote a model if needed, then populate
+    `Predictions` with deterministic forecasts for the next months (no
+    LLM involved — see `src/mlops/seed_predictions.py`). Never raises;
+    logs a warning and lets bootstrap continue on any failure.
+    """
+    environment = os.environ.get("SEED_SALES_PREDICTIONS_ENV", "prod")
+    months_ahead = int(os.environ.get("SEED_SALES_PREDICTIONS_MONTHS", "6"))
+    try:
+        from src.mlops.registry import ArtifactRegistry
+        from src.mlops.seed_predictions import seed_future_predictions
+
+        orders_def = _infer_orders_table_def()
+        registry = ArtifactRegistry()
+        _info(f"Seeding future Sales predictions (env={environment}, months_ahead={months_ahead})...")
+        written = seed_future_predictions(
+            repo,
+            orders_def,
+            registry,
+            environment=cast("Any", environment),
+            months_ahead=months_ahead,
+            force=force,
+        )
+        if written:
+            _info(f"Seeded {written} future predictions into 'Predictions' (env={environment}).")
+        else:
+            _info("Future predictions already present for the active model — skipped (use --force to reseed).")
+    except Exception as exc:
+        _info(f"WARNING: seeding future Sales predictions failed (non-fatal): {exc}")
 
 
 def cmd_teardown(remove_volume: bool | None = None) -> None:
@@ -568,6 +608,17 @@ def _run_ask_pipeline(
 
     document = generate_dictionary(inference, table_defs)
 
+    # v3.2 (004-sales-prediction-model amendment): expose the `Predictions`
+    # table (Postgres-only — not sourced from the Excel workbook, so it's
+    # absent from `table_defs`/`document`) as an extra queryable table so the
+    # LLM can answer forecast/predicted-sales questions with real SQL against
+    # it, not just the deterministic `predict-sales-nl` single-row path.
+    # Best-effort: if the table doesn't exist yet (never seeded), we still
+    # advertise its schema — `ask` will just return 0 rows, which is fine.
+    from src.mlops.predictions_store import predictions_table_def
+
+    extra_tables = {"predictions": predictions_table_def()}
+
     # --- Optional: load the Semantic Layer artifact for prompt enrichment (US3) ---
     semantic_doc = None
     if _SEMANTIC_LAYER_JSON_PATH.exists():
@@ -658,6 +709,7 @@ def _run_ask_pipeline(
             semantic_layer=semantic_doc,
             viewer=viewer,
             on_query_complete=on_query_complete,
+            extra_tables=extra_tables,
         )
         response = pipeline.run(NLQuestion(text=question))
 
@@ -866,6 +918,43 @@ def cmd_promote_sales_model(run_id: str, environment: str, force: bool = False) 
         f"Promoted run_id={record.run_id} to env={record.environment} "
         f"at {record.promoted_at.isoformat()} bypassed_staging_gate={str(record.bypassed_staging_gate).lower()}"
     )
+
+
+def cmd_seed_sales_predictions(environment: str, months_ahead: int, force: bool) -> None:
+    """seed-sales-predictions: manually (re-)run the batch forecast seeding
+    that `bootstrap` already runs automatically (see `_seed_sales_predictions`).
+    Useful to reseed after retraining, or to target a different environment
+    /horizon than the bootstrap defaults without a full bootstrap re-run.
+    """
+    from src.mlops.registry import ArtifactRegistry, RegistryError
+    from src.mlops.seed_predictions import seed_future_predictions
+
+    if not _docker_available():
+        _err("Docker is not running. Run `bootstrap` first to start the warehouse.")
+
+    orders_def = _infer_orders_table_def()
+    config = PostgresConfig.from_env()
+    registry = ArtifactRegistry()
+
+    try:
+        with PostgresRepository(config=config) as repo:
+            written = seed_future_predictions(
+                repo,
+                orders_def,
+                registry,
+                environment=cast("Any", environment),
+                months_ahead=months_ahead,
+                force=force,
+            )
+    except RegistryError as exc:
+        _err(str(exc))
+    except Exception as exc:
+        _err(f"seed-sales-predictions failed: {exc}")
+
+    if written:
+        print(f"Seeded {written} future predictions into 'Predictions' (env={environment}, months_ahead={months_ahead}).")
+    else:
+        print("Future predictions already present for the active model — skipped (use --force to reseed).")
 
 
 def cmd_predict_sales(environment: str, input_payload: dict[str, str]) -> None:
@@ -1328,6 +1417,7 @@ _COMMANDS = {
     "train-sales-model": None,
     "promote-sales-model": None,
     "predict-sales": None,
+    "seed-sales-predictions": None,
 }
 
 
@@ -1335,7 +1425,7 @@ def main(argv: list[str] | None = None) -> None:
     """CLI entrypoint: `python -m src.cli <command>`."""
     args = argv if argv is not None else sys.argv[1:]
     if not args or args[0] in ("-h", "--help"):
-        print("Usage: python -m src.cli.main {bootstrap|teardown|validate|generate-dictionary|generate-semantic-layer|metabase|ask|chart|evaluate|train-sales-model|promote-sales-model|predict-sales|predict-sales-nl} [args]")
+        print("Usage: python -m src.cli.main {bootstrap|teardown|validate|generate-dictionary|generate-semantic-layer|metabase|ask|chart|evaluate|train-sales-model|promote-sales-model|predict-sales|predict-sales-nl|seed-sales-predictions} [args]")
         print("Commands:")
         print("  bootstrap [--source PATH]        Bring up PG, load data, write manifest")
         print("  teardown [--remove-volume]        Stop & remove container (and optionally volume)")
@@ -1361,6 +1451,9 @@ def main(argv: list[str] | None = None) -> None:
         print("  predict-sales-nl <question> --env ENV")
         print("                                      LLM extracts the prediction inputs from a")
         print("                                       natural-language question, then predicts")
+        print("  seed-sales-predictions [--env ENV] [--months-ahead N] [--force]")
+        print("                                      Batch-forecast next months into `Predictions`")
+        print("                                      (runs automatically at the end of `bootstrap`)")
         sys.exit(0 if args else 1)
 
     command = args[0]
@@ -1557,9 +1650,33 @@ def main(argv: list[str] | None = None) -> None:
             _err(f"predict-sales is missing required flags for: {missing}")
         cmd_predict_sales(predict_environment, payload)
         return
+    if command == "seed-sales-predictions":
+        seed_environment = "prod"
+        seed_months_ahead = 6
+        seed_force = False
+        i = 0
+        while i < len(rest):
+            tok = rest[i]
+            if tok == "--env" and i + 1 < len(rest):
+                seed_environment = rest[i + 1]
+                i += 2
+                continue
+            if tok == "--months-ahead" and i + 1 < len(rest):
+                seed_months_ahead = int(rest[i + 1])
+                i += 2
+                continue
+            if tok == "--force":
+                seed_force = True
+                i += 1
+                continue
+            _err("Usage: python -m src.cli.main seed-sales-predictions [--env <dev|staging|prod>] [--months-ahead N] [--force]")
+        if seed_environment not in {"dev", "staging", "prod"}:
+            _err(f"Invalid environment: {seed_environment!r}. Use dev|staging|prod.")
+        cmd_seed_sales_predictions(seed_environment, seed_months_ahead, seed_force)
+        return
     handler = _COMMANDS.get(command)
     if handler is None:
-        _err(f"Unknown command: {command!r}. Use bootstrap|teardown|validate|generate-dictionary|generate-semantic-layer|metabase|ask|chart|evaluate|train-sales-model|promote-sales-model|predict-sales|predict-sales-nl.")
+        _err(f"Unknown command: {command!r}. Use bootstrap|teardown|validate|generate-dictionary|generate-semantic-layer|metabase|ask|chart|evaluate|train-sales-model|promote-sales-model|predict-sales|predict-sales-nl|seed-sales-predictions.")
 
     # Parse simple per-command args.
     if command == "bootstrap":

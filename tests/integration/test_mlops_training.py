@@ -31,12 +31,20 @@ pytestmark = pytest.mark.skipif(
 
 
 def _run_cli(*args: str, expect_success: bool = True) -> subprocess.CompletedProcess[str]:
+    # SEED_SALES_PREDICTIONS=false: see identical rationale in
+    # tests/integration/test_mlops_reproducibility.py — this test asserts an
+    # EXACT registry run count, which the v3.1 auto-seed-on-bootstrap
+    # best-effort training would otherwise inflate.
+    import os
+
+    env = {**os.environ, "SEED_SALES_PREDICTIONS": "false"}
     result = subprocess.run(
         ['uv', 'run', 'python', '-m', 'src.cli.main', *args],
         cwd=str(_REPO_ROOT),
         capture_output=True,
         text=True,
         timeout=1200,
+        env=env,
     )
     if expect_success and result.returncode != 0:
         pytest.fail(f"Command {' '.join(args)} failed:\nstdout={result.stdout}\nstderr={result.stderr}")

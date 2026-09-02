@@ -62,6 +62,7 @@ def build_prompt(
     dictionary: DataDictionaryDocument,
     table_def: TableDef,
     semantic_layer: SemanticLayerDocument | None = None,
+    extra_tables: dict[str, TableDef] | None = None,
 ) -> str:
     """Build the LLM prompt from the dictionary + (optional) semantic layer + NL question.
 
@@ -72,6 +73,14 @@ def build_prompt(
     v2.0: when `semantic_layer` is provided, inserts a condensed block of
     metrics + dimensions + joins between the Relationships block and the Rules
     block (~+400 tokens). See `research.md Part B` for the exact format.
+
+    v3.2 (004-sales-prediction-model amendment): when `extra_tables` is
+    provided (e.g. `{"predictions": predictions_table_def()}`), each table's
+    schema is rendered as its own standalone block (Postgres-only tables like
+    `Predictions` are not sourced from the Excel dictionary, so their columns
+    come straight from the injected `TableDef`). The LLM is told it MAY query
+    these tables independently of Orders (own `FROM` clause), for questions
+    about forecasted/future sales.
     """
     # Find the Orders table dictionary entry.
     orders_dict = None
@@ -137,8 +146,40 @@ def build_prompt(
             prompt_parts.append("")
             prompt_parts.append(_render_semantic_block(semantic_layer))
 
+    # v3.2: standalone schema block(s) for extra queryable tables (e.g.
+    # Predictions). These are independent FROM-clause targets, not JOINed
+    # with Orders — see the appended rule below.
+    if extra_tables:
+        for extra_def in extra_tables.values():
+            prompt_parts.append("")
+            prompt_parts.append(
+                f'Database schema ("{extra_def.name}" table — {extra_def.description}):'
+            )
+            for c in extra_def.columns:
+                key_flag = ", PRIMARY KEY" if c.is_primary_key else ""
+                nullable = "NULL" if c.nullable else "NOT NULL"
+                prompt_parts.append(
+                    f"- {c.name}: {c.logical_type.value}, {nullable}{key_flag}"
+                )
+
     prompt_parts.append("")
-    prompt_parts.append(_RULES_V2 if semantic_layer is not None else _RULES_V1)
+    rules = _RULES_V2 if semantic_layer is not None else _RULES_V1
+    if extra_tables:
+        table_names = ", ".join(f'"{td.name}"' for td in extra_tables.values())
+        rules = (
+            f"{rules}\n"
+            f"- You MAY query {table_names} on its own (its own FROM clause) when the "
+            "question is about forecasted/predicted future sales rather than historical "
+            f"actuals. Use only the columns listed in the {table_names} schema block "
+            "above when querying it.\n"
+            f"- If the question asks to COMPARE actuals (Orders) vs forecasts "
+            f"({table_names}) — e.g. by Region or Category — aggregate each table "
+            "separately (each with its own GROUP BY) in its own CTE or subquery, then "
+            "JOIN/UNION the two aggregates by their shared dimension (e.g. Region). "
+            "Do NOT join Orders and Predictions row-by-row — Predictions rows are "
+            "representative forecast profiles, not one row per historical order."
+        )
+    prompt_parts.append(rules)
     prompt_parts.append("")
     prompt_parts.append(f"User question: {question.text}")
 

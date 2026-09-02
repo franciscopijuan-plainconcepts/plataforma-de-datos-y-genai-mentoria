@@ -28,6 +28,7 @@ Se ejecutaron cinco features completas con Spec Kit:
    - Fix: `SqlValidator` ahora acepta funciones PostgreSQL (`to_char`, `date_trunc`, `round`, etc.).
 5. **Feature 005 (`sales-prediction-model`)** — v3.0: dominio `src/mlops/` aislado con `train-sales-model`, artifact registry `.artifacts/mlops/registry.json`, staged promotion (`promote-sales-model`) e inferencia (`predict-sales`), con historial de predicciones persistido en una tabla SQL `Predictions` (Amendment 2026-08-26).
    - Nota de continuidad: el directorio real sigue siendo `specs/004-sales-prediction-model/` por una colision historica de numeracion entre ramas; en narrativa de roadmap lo tratamos como la quinta feature entregada.
+   - **Amendment v3.1 (2026-09-02, sin spec-kit folder propio)**: `src/mlops/seed_predictions.py` + comando CLI `seed-sales-predictions`, integrado como paso best-effort al final de `bootstrap`. Decisión: el forecast para dashboards es batch/no-LLM (el LLM nunca invoca el modelo directamente), reutilizando `predict_sales()` sin lógica paralela. Documentado en detalle en `specs/004-sales-prediction-model/quickstart.md` § Amendment (2026-09-02).
 
 Cada feature siguio el flujo completo: constitution (solo 001), spec, plan + research + data-model + contracts + quickstart, tasks, implement por fases, validacion. La feature 003 introdujo:
 - `src/data_engineering/semantic_layer/` subpaquete (builder, resolver, governed_provider, registry, metrics, render).

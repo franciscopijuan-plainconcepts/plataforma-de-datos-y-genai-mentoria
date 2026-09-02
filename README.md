@@ -38,6 +38,7 @@ This platform lets you:
    see charts and dashboards without writing SQL yourself.
 
 4. **Train, promote, and run sales predictions locally** — an isolated `src/mlops/` domain trains two regressors over `Orders`, promotes approved runs across `dev`/`staging`/`prod`, and serves governed CLI inference flows with persisted prediction history.
+5. **See forecasted Sales for upcoming months without any live LLM/model call** — `bootstrap` automatically trains/promotes a model (first run only) and seeds the `Predictions` table with deterministic batch forecasts, so Metabase/dashboards have data immediately (see `src/mlops/seed_predictions.py`).
 
 ### Sales Prediction Model (M4 / v3.0 MLOps)
 
@@ -46,6 +47,42 @@ This platform lets you:
 - `train-sales-model` extracts training data only through the `QueryProvider`, applies shared feature engineering, performs a chronological split, compares RMSE/MAE/R² side by side, and persists both runs in `.artifacts/mlops/`.
 - `promote-sales-model` enforces staged promotion (`dev`/`staging`/`prod`) with an explicit `--force` governance bypass recorded in the registry history.
 - `predict-sales` loads the promoted model for an environment, reuses the exact same feature derivation logic as training, logs latency/input/output, degrades gracefully on unseen categories (`used_fallback_encoding`), and persists a historic row into the `Predictions` SQL table in addition to `.artifacts/mlops/predict_sales.log`.
+
+### Batch forecast seeding (v3.1, no LLM)
+
+> **Design decision**: populating a dashboard with "predicted Sales for the
+> next months" is a **batch** concern, not something the LLM should trigger
+> on-demand from the client. The LLM never calls the model directly
+> (constitution Principle I) — `predict-sales-nl` (LLM-parsed ad-hoc
+> questions) and this batch seeder both funnel through the exact same typed
+> `predict_sales()` function, but for *known, deterministic* forecast inputs
+> there is no reason to pay LLM latency/cost/failure-risk at seed time.
+
+- `src/mlops/seed_predictions.py` runs automatically at the end of `bootstrap` (best-effort — never fails bootstrap):
+  1. If no model is promoted yet in the target environment, it trains + promotes one automatically (picks the better RMSE, dev→staging→prod).
+  2. Extracts the top 10 most-frequent historical `(Region, Category)` combinations from `Orders` and builds a representative "typical order" profile for each (mode of the other categorical fields, median quantity).
+  3. Predicts `Sales` for each profile × the next N months (default 6) and persists every prediction into the `Predictions` SQL table via the same `predict_sales()` used by the CLI.
+  4. **Idempotent**: if the active model already has future-dated rows in `Predictions`, seeding is skipped (no duplicate rows on repeated `bootstrap` runs).
+- Controlled by `SEED_SALES_PREDICTIONS` / `SEED_SALES_PREDICTIONS_ENV` / `SEED_SALES_PREDICTIONS_MONTHS` (see `.env.example`).
+- Re-run manually anytime with `seed-sales-predictions [--env <env>] [--months-ahead N] [--force]` — useful after retraining, or to reseed a different environment/horizon without a full `bootstrap`.
+
+### Ask forecast questions via natural language (v3.2)
+
+> The governed `ask`/`chart` pipeline (and therefore `app_web.py`, which
+> shells out to `ask` under the hood) can now generate SQL against the
+> `Predictions` table (forecasted Sales, seeded by the batch process above),
+> in addition to `Orders`. This is READ-ONLY SQL over already-computed
+> forecasts — the LLM never calls the ML model itself (same Principle I
+> guarantee as `predict-sales-nl`, just extended to cover ad-hoc analytics
+> over the forecast history).
+
+- `_run_ask_pipeline` (used by `ask`/`chart`) now injects the `Predictions` schema (`src/mlops/predictions_store.py::predictions_table_def()`) as an **extra queryable table**, alongside the existing primary `Orders` table.
+- `SqlValidator.validate_sql()` accepts an optional `extra_tables` map: the extra table's name and ALL its own columns (e.g. `Predicted Sales`, `Predicted At`, `Run ID`, `Model Name`, `Environment`) are whitelisted, not just Orders' columns (the pre-existing "Returns" special case never needed this because Returns-specific columns were never referenced directly).
+- The prompt (`prompt_builder.build_prompt`) renders a standalone schema block for `Predictions` and instructs the LLM it MAY query it on its own **or** compare it against `Orders` (aggregate each side separately in a CTE/subquery, then join by a shared dimension like Region — never a row-by-row join, since `Predictions` rows are representative forecast profiles, not one row per historical order).
+- `SqlValidator` also accepts non-recursive read-only CTEs (`WITH x AS (SELECT ...) SELECT ...`) now — needed for actual-vs-predicted comparison queries; `WITH RECURSIVE` is still explicitly rejected, and any write keyword is still blocked regardless of CTE wrapping. Derived-table aliases (`FROM (SELECT ...) o`) are also recognized correctly now.
+- RLS still applies: `Predictions` has its own `Region` column, and `SemanticQueryResolver.apply_rls()` injects the `WHERE "Region" IN (...)` predicate directly into the SQL text regardless of which table is queried, so a viewer only sees forecasts for their own region(s).
+- Try it: `uv run python -m src.cli.main ask "What is the average predicted sales for the South America region?" --viewer <person>`, or `uv run python -m src.cli.main ask "Compara las ventas reales con las predichas por región" --viewer <person>`.
+- Also fixed while validating this feature (pre-existing, unrelated bugs that blocked real testing): `SqlValidator` was mis-parsing single-quoted string literals (e.g. `WHERE "Region" = 'Caribbean'`) as unknown column references; `LlmClient.generate_sql` now strips an accidental surrounding ```` ```sql ... ``` ```` markdown fence if the LLM ignores the "no markdown" rule.
 
 ### Milestones delivered
 
@@ -57,6 +94,8 @@ This platform lets you:
 | M3 | v2.0 | Semantic Layer: 8 metrics, 11 dimensions, RLS enforcement via `GovernedQueryProvider` |
 | M3.1 | v2.1 | Metabase integration: governed SQL cards from chat sessions + CLI ops |
 | M4 | v3.0 | Sales Prediction MLOps: training, registry, staged promotion, inference |
+| M4.1 | v3.1 | Batch forecast seeding: `Predictions` populated automatically on `bootstrap`, no LLM in the critical path |
+| M4.2 | v3.2 | `ask`/`chart`/`app_web.py` can query the `Predictions` table via natural language (SQL, RLS-governed) |
 
 ---
 
@@ -145,6 +184,7 @@ uv run python -m src.cli.main bootstrap
 - Loads all data into the warehouse.
 - Writes `.artifacts/load_manifest.json` with provenance (source hash).
 - The Metabase container also starts (but is not configured yet — see Step 7).
+- **(v3.1)** Creates the `Predictions` table and, best-effort, trains/promotes a sales model (first run only) and seeds it with the next 6 months of forecasted Sales — see [Batch forecast seeding](#batch-forecast-seeding-v31-no-llm) above. This never fails bootstrap; disable with `SEED_SALES_PREDICTIONS=false` in `.env`.
 
 **Expected output**: ends with `Bootstrap complete. Run 'validate' to confirm.`
 
@@ -274,7 +314,12 @@ viewer configurations (escape hatches like `admin_dev` with
 `allows_full_access: true`). **You do NOT need this for real-person logins**
 — `--viewer marilene_rousseau` resolves from the `People` table directly.
 
-### Step 10: Train the sales-prediction models
+### Step 10: (Optional) Train the sales-prediction models manually
+
+> **Note (v3.1)**: `bootstrap` (Step 3) already trains + promotes a model
+> automatically on first run and seeds `Predictions` with forecasts — you
+> only need this step if you want to train a **new** run manually (e.g. to
+> compare against the auto-trained one, or after changing hyperparameters).
 
 ```bash
 uv run python -m src.cli.main train-sales-model
@@ -297,6 +342,14 @@ uv run python -m src.cli.main predict-sales --env prod --ship-mode "Standard Cla
 ```
 
 This reuses the promoted artifact for the selected environment, prints the prediction, and appends a structured log entry to `.artifacts/mlops/predict_sales.log`.
+
+### Step 13: (Optional) Reseed future-month forecasts
+
+```bash
+uv run python -m src.cli.main seed-sales-predictions --env prod --force
+```
+
+Re-runs the batch forecast seeding manually (e.g. after promoting a new run in Step 11, or to target a different `--env`/`--months-ahead`). `--force` bypasses the idempotency check that `bootstrap` relies on.
 
 See [`specs/001-data-genai-platform-baseline/quickstart.md`](specs/001-data-genai-platform-baseline/quickstart.md) for the baseline validation guide, [`specs/003-semantic-layer-v1/quickstart.md`](specs/003-semantic-layer-v1/quickstart.md) for Semantic Layer validation, [`specs/004-metabase-integration/quickstart.md`](specs/004-metabase-integration/quickstart.md) for the Metabase workflow, and [`specs/004-sales-prediction-model/quickstart.md`](specs/004-sales-prediction-model/quickstart.md) for the sales-prediction train → promote → predict flow.
 
@@ -437,6 +490,8 @@ summary (`X / N correct`).
 | `train-sales-model` | Train and compare the local `linear_regression` and `catboost` sales models; persist runs under `.artifacts/mlops/`. |
 | `promote-sales-model --run-id <id> --env <dev\|staging\|prod>` | Promote a persisted run through the staged model lifecycle; `--force` records an explicit governance bypass. |
 | `predict-sales --env <env> ...` | Load the promoted model for an environment and predict `Sales` from the provided order features. |
+| `predict-sales-nl <question> --env <env>` | LLM extracts the prediction inputs from a natural-language question, then calls the same `predict_sales()` used above. |
+| `seed-sales-predictions [--env <env>] [--months-ahead N] [--force]` | Batch, no-LLM: train/promote if needed, then seed `Predictions` with the next N months of forecasts. Runs automatically at the end of `bootstrap`. |
 | `ask <question>` | Translate a natural-language question to SQL, apply RLS, execute, return typed rows. |
 | `ask --viewer <id>` | Login as a person (from the `People` table) and scope results to that person's region. |
 | `ask --allow-full-access` | Escape hatch for local/dev only (no RLS filtering). Logged as `gov.bypass`. |
@@ -457,6 +512,9 @@ summary (`X / N correct`).
 | `METABASE_ADMIN_EMAIL` | Conditional | — | Metabase admin email (required if Metabase is used). |
 | `METABASE_ADMIN_PASSWORD` | Conditional | — | Metabase admin password (must pass complexity check). |
 | `SEMANTIC_VIEWERS_FILE` | No | `viewers.yaml` | Path to viewers config (only needed for escape hatches). |
+| `SEED_SALES_PREDICTIONS` | No | `true` | Set to `false` to skip the automatic batch forecast seeding at the end of `bootstrap`. |
+| `SEED_SALES_PREDICTIONS_ENV` | No | `prod` | Environment whose promoted model is used (or auto-trained) to seed `Predictions`. |
+| `SEED_SALES_PREDICTIONS_MONTHS` | No | `6` | How many upcoming months to forecast per profile. |
 
 ---
 
@@ -516,12 +574,14 @@ src/
     metabase_client.py            #   MetabaseClient (ONLY module that imports httpx)
   mlops/                          # MLOps domain
     ...                           #   Sales-model training, registry, promotion, inference
+    seed_predictions.py           #   (v3.1) Batch, no-LLM seeding of future-month forecasts into `Predictions`
   data_access/                    # Engine-agnostic data-access layer
     interfaces.py                 #   Protocols (SchemaProvider, DataProvider, QueryProvider)
     adapters/postgres/            #   PostgreSQL adapter (repository, connection, roles)
   cli/                            # CLI entrypoints (composition root)
     main.py                       #   Commands: bootstrap, ask, metabase, evaluate, train-sales-model,
-                                  #   promote-sales-model, predict-sales, teardown, validate
+                                  #   promote-sales-model, predict-sales, predict-sales-nl,
+                                  #   seed-sales-predictions, teardown, validate
 scripts/                          # Standalone scripts
   metabase_bootstrap.py           #   Metabase initial setup (admin user + DB + collection + PG role)
 tests/                            # contract / integration / unit tests

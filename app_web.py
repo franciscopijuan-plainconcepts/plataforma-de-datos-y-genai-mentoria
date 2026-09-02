@@ -307,7 +307,8 @@ if run and question.strip():
         st.error(
             "La consulta no se pudo generar o no superó la validación. "
             "Reformula la pregunta: la plataforma solo acepta consultas de "
-            "lectura sobre la tabla de ventas (Orders)."
+            "lectura (SELECT) sobre las tablas de ventas (Orders) y de "
+            "previsión de ventas (Predictions)."
         )
         st.stop()
 
