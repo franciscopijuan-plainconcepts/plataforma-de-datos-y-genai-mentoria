@@ -15,6 +15,8 @@ Reference: specs/002-text-to-sql-v1/research.md Part A
 
 from __future__ import annotations
 
+import pytest
+
 from src.ai_engineering.sql_validator import validate_sql
 from src.contracts.data_access import ColumnDef, LogicalType, TableDef
 
@@ -184,3 +186,32 @@ def test_people_join_rejected() -> None:
     assert "people" in reason or "out-of-scope" in reason, (
         f"Expected rejection reason to mention People, got: {result.reason!r}"
     )
+
+
+@pytest.mark.parametrize("sql", [
+    'SELECT * FROM "People"',
+    'SELECT * FROM public."Orders"',
+    'SELECT * FROM "Orders" UNION SELECT * FROM "Orders"',
+    'WITH x AS (SELECT * FROM "Orders") SELECT * FROM x',
+    'SELECT * INTO stolen FROM "Orders"',
+    'SELECT * FROM "Orders" FOR UPDATE',
+    'SELECT pg_read_file(\'/tmp/not-allowed\')',
+    'SELECT public.sum("Sales") FROM "Orders"',
+    'SELECT * FROM generate_series(1, 10)',
+    'SELECT * FROM (SELECT * FROM "Orders") x',
+    'SELECT r."Sales" FROM "Returns" r',
+    'SELECT x."Sales" FROM "Orders" o',
+    'SELECT x.* FROM "Orders" o',
+    'SELECT x."Sales" FROM "Orders" x JOIN "Orders" x ON TRUE',
+    'SELECT * FROM ONLY "Orders"',
+    'SELECT "Region" FROM "Orders" o JOIN "Returns" r ON r."Order ID" = o."Order ID"',
+])
+def test_ast_rejects_unsupported_or_ambiguous_forms(sql: str) -> None:
+    result = validate_sql(sql, TABLE_DEF)
+    assert not result.accepted and result.reason
+
+
+def test_keywords_inside_literals_are_not_statements() -> None:
+    assert validate_sql(
+        'SELECT "Sales" FROM "Orders" WHERE "Region" = \'North; DROP TABLE example\'', TABLE_DEF,
+    ).accepted

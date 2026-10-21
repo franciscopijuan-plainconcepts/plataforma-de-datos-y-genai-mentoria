@@ -1,224 +1,129 @@
-"""Semantic Layer RLS resolver (v2.0) — pure function `apply_rls`.
-
-Applies Row-Level Security to a validated SELECT SQL by wrapping it in an
-outer subquery with `WHERE "Region" IN (viewer.regions)`. The resolver is
-a PURE FUNCTION — no DB calls, no LLM, no file I/O (aside from the optional
-`gov.bypass` audit log, which goes through a standard `logging.Logger`).
-
-Reference: specs/003-semantic-layer-v1/research.md Part A (RLS Strategy —
-subquery wrapping; robust to existing WHERE, GROUP BY, ORDER BY, LIMIT).
-            specs/003-semantic-layer-v1/contracts/semantic_layer.md
-            specs/003-semantic-layer-v1/tasks.md T015, T018
-"""
+"""Pure AST transformation restricting each analytic scan before aggregation."""
 
 from __future__ import annotations
 
 import logging
-import re
 from typing import Callable
 
+import sqlglot
+from sqlglot import exp
+from sqlglot.optimizer.scope import Scope, traverse_scope
+
 from src.contracts.data_access import TableDef
-from src.contracts.semantic_layer import SemanticQueryResolverProtocol, SemanticViewer
+from src.contracts.semantic_layer import SemanticViewer
+from src.data_access.sql_validator import validate_sql
 
 
 _logger = logging.getLogger(__name__)
-
-# The outer alias used by the resolver. The SqlValidator already enforces
-# that the LLM never generates this aliased subquery (its output is a plain
-# SELECT), so collisions with user aliases are not a concern.
-_GOVERNED_ALIAS = "_gov"
-
-# The RLS anchor column. All three warehouse tables (Orders, Returns, People)
-# have this column; the resolver always uses it with double-quoting to match
-# the case-sensitive PostgreSQL schema.
-_RLS_COLUMN = '"Region"'
-
-
-# A pluggable audit-log sink so tests can capture `gov.bypass` events without
-# requiring the logging module. Defaults to the module-level logger.
 GovBypassLogger = Callable[[str, str, list[str]], None]
 
 
-def _default_gov_bypass_logger(
-    viewer_id: str, sql: str, regions: list[str]
-) -> None:
-    """Default audit logger for gov.bypass events (used on `allows_full_access`)."""
-    _logger.warning(
-        "gov.bypass: viewer=%s regions=%s sql=%r",
-        viewer_id,
-        regions,
-        sql,
-    )
+def _default_gov_bypass_logger(viewer_id: str, sql: str, regions: list[str]) -> None:
+    _logger.warning("gov.bypass: viewer=%s regions=%s sql=%r", viewer_id, regions, sql)
 
 
-def _sql_quote_string(value: str) -> str:
-    """Single-quote a SQL string literal, escaping internal single quotes.
+def _column_source(scope: Scope, column: exp.Column) -> exp.Table | None:
+    if not column.table:
+        return None
+    cursor: Scope | None = scope
+    while cursor is not None:
+        source = cursor.sources.get(column.table)
+        if source is not None:
+            return source if isinstance(source, exp.Table) else None
+        cursor = cursor.parent if cursor.can_be_correlated else None
+    return None
 
-    PostgreSQL uses the ''escape (single-quote doubled) inside single-quoted
-    strings. This is defensive — viewer regions come from a local config file,
-    but sanitization prevents any injection regardless of source.
-    """
-    escaped = value.replace("'", "''")
-    return f"'{escaped}'"
+
+def _conjuncts(expression: exp.Expr) -> list[exp.Expr]:
+    expression = expression.unnest()
+    if isinstance(expression, exp.And):
+        return _conjuncts(expression.this) + _conjuncts(expression.expression)
+    return [expression]
+
+
+def _order_linked_returns(tree: exp.Select) -> set[int]:
+    """Keep legacy global return existence only behind an authorized order key."""
+    linked: set[int] = set()
+    for scope in traverse_scope(tree):
+        returns = [table for table in scope.tables if table.name.lower() == "returns"]
+        if not returns or scope.expression is tree:
+            continue
+        select = scope.expression
+        valid_exists = (
+            isinstance(select, exp.Select) and isinstance(select.parent, exp.Exists)
+            and len(scope.sources) == 1 and len(returns) == 1
+            and len(select.expressions) == 1
+            and isinstance(select.expressions[0], exp.Literal)
+            and select.expressions[0].this == "1"
+            and not select.expressions[0].is_string
+            and select.args.get("where") is not None
+        )
+        if valid_exists:
+            for predicate in _conjuncts(select.args["where"].this):
+                if not isinstance(predicate, exp.EQ):
+                    continue
+                left, right = predicate.this, predicate.expression
+                if (not isinstance(left, exp.Column) or not isinstance(right, exp.Column)
+                        or left.name != "Order ID" or right.name != "Order ID"):
+                    continue
+                sources = [_column_source(scope, left), _column_source(scope, right)]
+                if (any(source is returns[0] for source in sources)
+                        and any(source is not None and source not in scope.tables
+                                and source.name.lower() == "orders" for source in sources)):
+                    linked.add(id(returns[0]))
+                    break
+        if any(id(table) not in linked for table in returns):
+            raise ValueError(
+                "Returns subquery must be SELECT 1 inside EXISTS with a mandatory "
+                "Order ID equality to an outer authorized Orders scan"
+            )
+    return linked
 
 
 class SemanticQueryResolver:
-    """Pure-function implementation of `SemanticQueryResolverProtocol`.
+    def __init__(self, gov_bypass_logger: GovBypassLogger | None = None) -> None:
+        self._gov_bypass_logger = gov_bypass_logger or _default_gov_bypass_logger
 
-    The resolver wraps the validated input SQL in an outer subquery and
-    applies an outer `WHERE "Region" IN (viewer.regions)` filter. It handles
-    the following cases:
-
-    1. `viewer.allows_full_access=True` AND `viewer.is_local_dev=True`
-       → logs `gov.bypass` and returns the SQL UNCHANGED (no wrapping).
-    2. `viewer.regions=[]` (and not full-access)
-       → returns `SELECT * FROM ({sql}) AS _gov WHERE FALSE` (0 rows).
-    3. `viewer.regions=[R1, R2, ...]`
-       → returns `SELECT * FROM ({sql}) AS _gov WHERE "Region" IN ('R1','R2',...)`.
-
-    The resolver is engine-neutral: it produces a SQL string, not a DB call.
-    The PostgresAdapter executes it as-is after the wrapping.
-    """
-
-    def __init__(
-        self,
-        gov_bypass_logger: GovBypassLogger | None = None,
-    ) -> None:
-        self._gov_bypass_logger = (
-            gov_bypass_logger if gov_bypass_logger is not None
-            else _default_gov_bypass_logger
-        )
-
-    def apply_rls(
-        self,
-        sql: str,
-        viewer: SemanticViewer,
-        table_def: TableDef,
-    ) -> str:
-        """Wrap the SQL with a Region-scoped filter per the viewer's governance context.
-
-        Args:
-            sql: a validated single SELECT statement (the SqlValidator already
-                confirmed it is SELECT-only, single-statement, no comments,
-                no forbidden keywords, and references only Orders + Returns
-                columns/tables).
-            viewer: the runtime governance context (regions + allows_full_access
-                + is_local_dev).
-            table_def: the schema of the queried table (used for sanity —
-                the anchor "Region" column must exist on at least one table
-                the SQL may reference).
-
-        Returns:
-            The governed SQL string (possibly unchanged if full-access is
-            granted in a local-dev environment).
-        """
-        # 1. Full-access bypass — ONLY in local/dev/test (is_local_dev gating
-        #    is already enforced at the registry layer; we re-check here as
-        #    defense-in-depth).
-        if viewer.allows_full_access:
-            if not viewer.is_local_dev:
-                # Defense-in-depth: refuses to bypass outside local-dev, even
-                # if a viewer config somehow has both flags set. This path
-                # should be unreachable (the registry sanitizes it), but we
-                # never trust the input for governance.
-                _logger.warning(
-                    "gov.bypass refused in non-local environment: viewer=%s",
-                    viewer.viewer_id,
-                )
-                # Fall through to forced FALSE to be safe.
-                return self._wrap_false(sql, viewer)
+    def apply_rls(self, sql: str, viewer: SemanticViewer, table_def: TableDef) -> str:
+        validation = validate_sql(sql, table_def)
+        if not validation.accepted:
+            raise ValueError(f"Governance rejected SQL: {validation.reason}")
+        if viewer.allows_full_access and viewer.is_local_dev:
             self._gov_bypass_logger(viewer.viewer_id, sql, list(viewer.regions))
             return sql
-
-        # 2. Empty regions => viewer sees 0 rows.
-        if not viewer.regions:
-            return self._wrap_false(sql, viewer)
-
-        # 3. Standard subquery wrapping with Region IN (regions).
-        return self._wrap_region_filter(sql, viewer.regions)
-
-    # --- Internal construction helpers -------------------------------------
-
-    def _wrap_region_filter(self, sql: str, regions: list[str]) -> str:
-        """Inject the `Region IN (...)` filter into the LLM SQL.
-
-        Strategy: insert the predicate into the SQL at the right clause
-        boundary — either AND-ing an existing WHERE, or introducing a new
-        WHERE before GROUP BY / ORDER BY / LIMIT / end-of-query.
-
-        This is more robust than the naive `SELECT * FROM ({sql}) WHERE
-        "Region" IN (...)` because that wrapping breaks when the inner SQL
-        is an aggregation (e.g. `SELECT SUM("Sales") FROM Orders`) that
-        doesn't expose `Region` in its outer projection. Injecting the
-        predicate directly into the inner WHERE clause lets PostgreSQL's
-        planner push the Region filter down to the Orders scan.
-        """
-        quoted = ", ".join(_sql_quote_string(r) for r in regions)
-        predicate = f'"Region" IN ({quoted})'
-
-        inner = sql.rstrip()
-        if inner.endswith(";"):
-            inner = inner[:-1]
-        normalized = inner.rstrip()
-
-        lower = normalized.lower()
-
-        # If the SQL already has a WHERE, AND the predicate at the end of
-        # that WHERE (just before GROUP BY / ORDER BY / HAVE / LIMIT / end).
-        if re.search(r"\bwhere\b", lower):
-            # Find the position where the WHERE clause ends — that is, the
-            # start of GROUP BY / ORDER BY / HAVE / LIMIT / OFFSET / WINDOW
-            # that follows the WHERE (or end-of-string if none).
-            tail_keywords = (
-                r"\bgroup\s+by\b",
-                r"\border\s+by\b",
-                r"\bhaving\b",
-                r"\blimit\b",
-                r"\boffset\b",
-                r"\bwindow\b",
-                r"\bfor\b",  # FOR UPDATE / FOR SHARE
-                r"\bunion\b",
-                r"\bintersect\b",
-                r"\bexcept\b",
+        refused_bypass = viewer.allows_full_access and not viewer.is_local_dev
+        if refused_bypass:
+            _logger.warning("gov.bypass refused in non-local environment: viewer=%s", viewer.viewer_id)
+        no_access = refused_bypass or not viewer.regions
+        tree = sqlglot.parse_one(sql, read="postgres")
+        if not isinstance(tree, exp.Select):
+            raise ValueError("Governance requires a SELECT")
+        linked_returns = _order_linked_returns(tree)
+        # Snapshot the original scans: never visit the replacements recursively.
+        for table in list(tree.find_all(exp.Table)):
+            if id(table) in linked_returns:
+                if table.args.get("alias") is None:
+                    table.set("alias", exp.TableAlias(this=table.this.copy()))
+                table.set("this", exp.to_identifier("Returns", quoted=True))
+                continue
+            alias = table.args.get("alias")
+            if alias is None:
+                alias = exp.TableAlias(this=table.this.copy())
+            physical_name = table_def.name if table.name.lower() == table_def.name.lower() else "Returns"
+            physical = exp.Table(this=exp.to_identifier(physical_name, quoted=True))
+            predicate = (
+                exp.false() if no_access else exp.In(
+                    this=exp.column("Region", quoted=True),
+                    expressions=[exp.Literal.string(region) for region in viewer.regions],
+                )
             )
-            insertion_pos = len(normalized)
-            for pattern in tail_keywords:
-                m = re.search(pattern, lower)
-                if m is not None and m.start() < insertion_pos:
-                    insertion_pos = m.start()
-            head = normalized[:insertion_pos].rstrip()
-            tail = normalized[insertion_pos:]
-            # Strip trailing whitespace then AND the predicate.
-            return f"{head} AND {predicate} {tail}".rstrip()
-
-        # No WHERE: insert one just before GROUP BY / ORDER BY / LIMIT / end.
-        tail_keywords = (
-            r"\bgroup\s+by\b",
-            r"\border\s+by\b",
-            r"\bhaving\b",
-            r"\blimit\b",
-            r"\boffset\b",
-            r"\bwindow\b",
-            r"\bfor\b",
-            r"\bunion\b",
-            r"\bintersect\b",
-            r"\bexcept\b",
-        )
-        insertion_pos = len(normalized)
-        for pattern in tail_keywords:
-            m = re.search(pattern, lower)
-            if m is not None and m.start() < insertion_pos:
-                insertion_pos = m.start()
-        head = normalized[:insertion_pos].rstrip()
-        tail = normalized[insertion_pos:]
-        return f'{head} WHERE {predicate} {tail}'.rstrip()
-
-    def _wrap_false(self, sql: str, viewer: SemanticViewer) -> str:
-        """Build `SELECT * FROM ({sql}) AS _gov WHERE FALSE` (viewer sees 0 rows)."""
-        inner = sql.rstrip()
-        if inner.endswith(";"):
-            inner = inner[:-1]
-        return f"SELECT * FROM ({inner}) AS {_GOVERNED_ALIAS} WHERE FALSE"
-
-
-__all__ = ["SemanticQueryResolver"]
+            filtered = exp.select("*").from_(physical).where(predicate)
+            table.replace(exp.Subquery(this=filtered, alias=alias.copy()))
+        if no_access:
+            # Preserve the public no-region behavior: no aggregate row either.
+            tree = exp.select("*").from_(tree.subquery("_gov")).where(exp.false())
+        governed = tree.sql(dialect="postgres")
+        validation = validate_sql(governed, table_def, allow_governed_sources=True)
+        if not validation.accepted:
+            raise ValueError(f"Governed SQL failed validation: {validation.reason}")
+        return governed

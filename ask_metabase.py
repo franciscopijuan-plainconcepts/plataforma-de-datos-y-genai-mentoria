@@ -1,8 +1,8 @@
-"""Puente Text-to-SQL -> Metabase (demo local, no versionado).
+"""Puente Text-to-SQL -> Metabase (demo local).
 
 Flujo "usuario de negocio": pregunta en lenguaje natural -> el pipeline `ask`
-del repo (LLM de Forge + capa semantica + RLS) genera y valida el SQL -> este
-script crea una "question" en Metabase con ese SQL y devuelve la URL para verla.
+del repo (LLM de Forge + capa semantica + RLS) ejecuta SQL gobernado -> este
+script publica el SQL efectivo solo tras exito y devuelve la URL para verla.
 
 Uso:
     # Flujo completo (requiere FORGE_API_KEY en .env):
@@ -22,14 +22,17 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import re
 import subprocess
 import sys
 import urllib.error
 import urllib.request
 from pathlib import Path
+from typing import NoReturn
 
 from dotenv import load_dotenv
+from pydantic import ValidationError
+
+from src.contracts.text_to_sql import TextToSqlResponse
 
 _REPO_ROOT = Path(__file__).resolve().parent
 load_dotenv(_REPO_ROOT / ".env")
@@ -39,7 +42,7 @@ METABASE_API_KEY = os.environ.get("METABASE_API_KEY", "")
 METABASE_DB_NAME = os.environ.get("METABASE_DB_NAME", "Global Superstore")
 
 
-def _die(msg: str) -> None:
+def _die(msg: str) -> NoReturn:
     print(f"ERROR: {msg}", file=sys.stderr)
     sys.exit(1)
 
@@ -92,38 +95,27 @@ def resolve_database_id() -> int:
 
 
 def ask_pipeline_for_sql(question: str, viewer: str, _retries: int = 1) -> str:
-    """Ejecuta el `ask` de Paco (LLM + validacion + RLS) y extrae el SQL generado.
-
-    El LLM a veces devuelve SQL vacio de forma puntual; en ese caso (y solo en
-    ese) se reintenta una vez antes de rendirse.
-    """
-    cmd = [sys.executable, "-m", "src.cli.main", "ask", question, "--viewer", viewer]
+    """Consume SQL efectivo tras exito, sin duplicar tarjetas ni reintentar rechazos."""
+    cmd = [
+        sys.executable, "-m", "src.cli.main", "ask", question,
+        "--viewer", viewer, "--json", "--no-metabase",
+    ]
     result = subprocess.run(
         cmd, cwd=_REPO_ROOT, capture_output=True, text=True, timeout=180
     )
-    output = result.stdout + result.stderr
-
-    # SQL vacio o rechazado: fallo transitorio tipico del LLM -> reintentar.
-    empty_sql = bool(re.search(r"Generated SQL:\s*\nValidation:", result.stdout))
-    rejected = "Validation: REJECTED" in result.stdout
-    if (empty_sql or rejected or result.returncode != 0) and _retries > 0:
-        print("      (SQL vacio o rechazado, reintentando la generacion...)")
-        return ask_pipeline_for_sql(question, viewer, _retries=_retries - 1)
-
     if result.returncode != 0:
-        _die(f"El pipeline `ask` fallo:\n{output}")
-    if rejected:
-        reason = re.search(r"Reason: (.+)", result.stdout)
-        _die(f"El validador rechazo el SQL: {reason.group(1) if reason else output}")
-
-    # El SQL puede venir en varias lineas: capturar desde "Generated SQL: "
-    # hasta la linea "Validation:" (re.S para que . cruce saltos de linea).
-    match = re.search(r"Generated SQL: (.+?)\nValidation:", result.stdout, re.S)
-    if not match:
-        _die(f"No encontre 'Generated SQL:' en la salida del pipeline:\n{output}")
-    if "Validation: ACCEPTED" not in result.stdout:
-        _die(f"El validador rechazo el SQL generado:\n{output}")
-    return " ".join(match.group(1).split()).strip()
+        _die(f"El pipeline `ask` fallo:\n{result.stderr}\n{result.stdout}")
+    try:
+        response = TextToSqlResponse.model_validate_json(result.stdout)
+    except ValidationError as exc:
+        _die(f"Respuesta JSON invalida del pipeline: {exc}")
+    if response.error or not response.validation.accepted:
+        _die(f"Consulta rechazada: {response.error or response.validation.reason}")
+    if response.query_result is None or response.query_result.error:
+        _die(f"La consulta no se ejecuto con exito: {response.query_result}")
+    if not response.query_result.sql.strip():
+        _die("El pipeline no devolvio SQL ejecutado.")
+    return response.query_result.sql
 
 
 def guess_display(sql: str) -> str:
@@ -216,6 +208,7 @@ def main() -> None:
         _die("Falta METABASE_API_KEY en .env (crearla en Metabase: Admin -> Claves de API).")
 
     if args.sql:
+        print("AVISO: --sql publica SQL manual sin aplicar la gobernanza del pipeline.", file=sys.stderr)
         sql, name = args.sql, args.name or "Question generada por el puente"
     elif args.question:
         if not args.viewer:

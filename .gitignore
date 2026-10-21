@@ -59,12 +59,21 @@ desktop.ini
 # baseline so reviewers can read it without running the pipeline. Uncomment
 # to ignore it if you prefer to regenerate on demand.
 # data_dictionary.md
-# --- MLOps artifacts ---
-.artifacts/mlops/models/
-.artifacts/mlops/predict_sales.log
-.artifacts/mlops/registry.json
-
-# --- Metabase local state cache (feature 004) ---
-# `metabase setup` writes the latest known state (admin email, db_id,
-# collection_id, version) here for idempotency. Regeneratable via the CLI.
-.artifacts/metabase_state.json
+/.artifacts/
+/openspec/
+.github/agents/openspec.agent.md
+.github/prompts/opsx-apply.prompt.md
+.github/prompts/opsx-archive.prompt.md
+.github/prompts/opsx-explore.prompt.md
+.github/prompts/opsx-propose.prompt.md
+.github/prompts/opsx-sync.prompt.md
+.github/prompts/opsx-update.prompt.md
+.github/skills/openspec-apply-change/SKILL.md
+.github/skills/openspec-archive-change/SKILL.md
+.github/skills/openspec-explore/SKILL.md
+.github/skills/openspec-propose/SKILL.md
+.github/skills/openspec-sync-specs/SKILL.md
+.github/skills/openspec-update-change/SKILL.md
+.github/workflows/copilot-setup-steps.yml
+.openspec/*
+PRESENTACIÓN/

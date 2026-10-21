@@ -2,6 +2,13 @@
 
 Guia de continuidad para el equipo sobre como usamos Spec Kit en este proyecto, que se genero, donde vive cada artefacto y como seguir trabajando con el mismo flujo.
 
+> Esta guia describe las entregas historicas de Spec Kit. La migracion posterior
+> a Apache Ossie se gestiona en
+> [OpenSpec](openspec/changes/migrate-semantic-layer-to-apache-ossie/tasks.md);
+> su fuente editable es [sales.ossie.yaml](semantic/sales.ossie.yaml), no las
+> antiguas definiciones Python ni el JSON derivado. Ver
+> [estado y validacion actuales](docs/semantic-migration.md).
+
 ## Objetivo de esta guia
 
 - Estandarizar como levantar nuevas funcionalidades con Spec Kit.

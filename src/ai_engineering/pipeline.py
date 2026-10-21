@@ -23,14 +23,15 @@ from src.contracts.dictionary import DataDictionaryDocument
 from src.contracts.semantic_layer import SemanticLayerDocument, SemanticViewer
 from src.contracts.text_to_sql import (
     GeneratedSql,
+    GovernedExecutionProvider,
     LlmConfig,
     NLQuestion,
+    PreparedQuery,
     QueryResult,
     QueryRow,
     TextToSqlResponse,
     ValidationResult,
 )
-from src.data_access.interfaces import QueryProvider
 
 # v2.1 (feature 004-metabase-integration): optional sink callback invoked at
 # the end of a successful `run()`. Generic by design — the pipeline does NOT
@@ -84,8 +85,12 @@ def _log_call(
     line = (
         f"[{ts}] question={q!r} sql={sql!r} accepted={accepted} "
         f"reason={reason!r} rows={rows} error={err!r} latency_ms={latency_ms} "
-        f"viewer_id={viewer_id} regions={regions!r} gov_bypass={gov_bypass}\n"
+        f"viewer_id={viewer_id} regions={regions!r} gov_bypass={gov_bypass} "
+        f"effective_sql={response.query_result.sql if response.query_result else None!r} "
+        f"model_sha256={response.query_result.model_sha256 if response.query_result else None}\n"
     )
+    if response.query_result is not None and response.query_result.provenance is not None:
+        line = line.rstrip("\n") + f" provenance={response.query_result.provenance.model_dump_json()}\n"
     with _LOG_PATH.open("a", encoding="utf-8") as f:
         f.write(line)
 
@@ -96,7 +101,7 @@ class TextToSqlPipeline:
     Dependencies are injected so the pipeline can be tested with fakes:
     - `dictionary` + `table_def`: the semantic context (from the baseline).
     - `llm_client`: the typed LLM wrapper.
-    - `query_provider`: the data-access Protocol for executing validated SQL.
+    - `query_provider`: the shared governed preparation/execution Protocol.
     - `llm_config`: for reproducibility (captured in `TextToSqlRequest`).
     """
 
@@ -105,7 +110,7 @@ class TextToSqlPipeline:
         dictionary: DataDictionaryDocument,
         table_def: TableDef,
         llm_client: LlmClient,
-        query_provider: QueryProvider,
+        query_provider: GovernedExecutionProvider,
         llm_config: LlmConfig,
         semantic_layer: SemanticLayerDocument | None = None,
         viewer: SemanticViewer | None = None,
@@ -129,6 +134,14 @@ class TextToSqlPipeline:
         # callback receives `response.query_result.sql` (governed) so sinks
         # like Metabase preserve Principle IV NON-NEGOTIABLE by design.
         self._on_query_complete = on_query_complete
+
+    def execute_reference_sql(self, sql: str) -> list[QueryRow]:
+        """Execute an evaluation reference with the same access, without LLM or sink."""
+        validation = validate_sql(sql, self._table_def)
+        if not validation.accepted:
+            raise ValueError(f"Reference SQL rejected: {validation.reason}")
+        prepared = self._query_provider.prepare_query(sql, self._table_def)
+        return self._query_provider.execute_prepared_query(prepared, self._table_def)
 
     def run(self, question: NLQuestion) -> TextToSqlResponse:
         """Run the full Text-to-SQL pipeline for a single question.
@@ -182,27 +195,33 @@ class TextToSqlPipeline:
 
         # 4. Execute the validated SQL.
         start = time.time()
+        prepared: PreparedQuery | None = None
         try:
-            rows: list[QueryRow] = self._query_provider.execute_readonly_query(
-                generated.sql, self._table_def
+            prepared = self._query_provider.prepare_query(generated.sql, self._table_def)
+            rows: list[QueryRow] = self._query_provider.execute_prepared_query(
+                prepared, self._table_def
             )
             latency_ms = int((time.time() - start) * 1000)
             result = QueryResult(
-                sql=generated.sql,
+                sql=prepared.sql,
                 rows=rows,
                 row_count=len(rows),
                 latency_ms=latency_ms,
                 error=None,
+                model_sha256=prepared.model_sha256,
+                provenance=prepared.provenance,
             )
         except Exception as exc:
             latency_ms = int((time.time() - start) * 1000)
             _logger.error("SQL execution failed: %s", exc)
             result = QueryResult(
-                sql=generated.sql,
+                sql=prepared.sql if prepared is not None else "",
                 rows=[],
                 row_count=0,
                 latency_ms=latency_ms,
                 error=str(exc),
+                model_sha256=prepared.model_sha256 if prepared is not None else None,
+                provenance=prepared.provenance if prepared is not None else None,
             )
 
         _logger.info(
@@ -224,7 +243,7 @@ class TextToSqlPipeline:
         # callback at the END of a successful `run()`. Best-effort (FR-013):
         # any exception is swallowed and logged, so the pipeline never breaks
         # because Metabase (or any sink) is unavailable.
-        if self._on_query_complete is not None:
+        if self._on_query_complete is not None and result.error is None:
             try:
                 self._on_query_complete(response, self._viewer)
             except Exception as exc:  # noqa: BLE001 — sinks must be best-effort

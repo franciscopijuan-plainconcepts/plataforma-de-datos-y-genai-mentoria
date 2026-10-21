@@ -13,8 +13,6 @@ Reference: specs/003-semantic-layer-v1/contracts/semantic_layer.md
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
-
 import pytest
 from pydantic import BaseModel
 
@@ -28,7 +26,7 @@ from src.contracts.semantic_layer import (
     TableSemanticClassification,
 )
 from src.contracts.text_to_sql import QueryRow
-from src.data_engineering.semantic_layer.metrics import get_metrics
+from tests.semantic_fixtures import _load_test_semantic_layer
 
 
 # --- All models are Pydantic v2 ---
@@ -69,8 +67,8 @@ def test_metric_name_must_be_snake_case() -> None:
 
 
 def test_all_canonical_metrics_present() -> None:
-    """FR-003: exactly 8 canonical metrics defined in metrics.py."""
-    names = {m.name for m in get_metrics()}
+    """FR-003: exactly eight canonical metrics are loaded from Ossie."""
+    names = {m.name for m in _load_test_semantic_layer().metrics}
     expected = {
         "gross_sales",
         "returned_amount",
@@ -100,143 +98,9 @@ def test_viewer_id_must_be_snake_case() -> None:
 
 # --- SemanticLayerDocument should build with canonical metrics ---
 
-def _build_canonical_document() -> SemanticLayerDocument:
-    """Construct a document matching the canonical 8 metrics + 11 dimensions + 2 relationships."""
-    metrics = get_metrics()
-    # Build a dimension list — column names match the dictionary fixture.
-    dims = [
-        Dimension(
-            name="region",
-            column="Region",
-            source_table="Orders",
-            business_description="Geographic region of the order.",
-            dimension_type="geographic",
-        ),
-        Dimension(
-            name="country",
-            column="Country",
-            source_table="Orders",
-            business_description="Country of the delivery address.",
-            dimension_type="geographic",
-        ),
-        Dimension(
-            name="market",
-            column="Market",
-            source_table="Orders",
-            business_description="Top-level market.",
-            dimension_type="geographic",
-        ),
-        Dimension(
-            name="segment",
-            column="Segment",
-            source_table="Orders",
-            business_description="Customer segment.",
-            dimension_type="categorical",
-        ),
-        Dimension(
-            name="category",
-            column="Category",
-            source_table="Orders",
-            business_description="Product category.",
-            dimension_type="categorical",
-        ),
-        Dimension(
-            name="sub_category",
-            column="Sub-Category",
-            source_table="Orders",
-            business_description="Product sub-category.",
-            dimension_type="categorical",
-        ),
-        Dimension(
-            name="ship_mode",
-            column="Ship Mode",
-            source_table="Orders",
-            business_description="Shipping class.",
-            dimension_type="categorical",
-        ),
-        Dimension(
-            name="order_priority",
-            column="Order Priority",
-            source_table="Orders",
-            business_description="Priority level of the order.",
-            dimension_type="categorical",
-        ),
-        Dimension(
-            name="order_date",
-            column="Order Date",
-            source_table="Orders",
-            business_description="Date the order was placed.",
-            dimension_type="temporal",
-        ),
-        Dimension(
-            name="customer",
-            column="Customer Name",
-            source_table="Orders",
-            business_description="Customer name.",
-            dimension_type="categorical",
-        ),
-        Dimension(
-            name="product",
-            column="Product Name",
-            source_table="Orders",
-            business_description="Product name.",
-            dimension_type="categorical",
-        ),
-    ]
-    rels = [
-        SemanticRelationship(
-            name="orders_to_returns",
-            from_table="Returns",
-            from_column="Order ID",
-            to_table="Orders",
-            to_column="Order ID",
-            cardinality="N:1",
-            join_type="LEFT",
-            notes='Returns."Order ID" has 63 duplicates — use EXISTS, not direct JOIN.',
-        ),
-        SemanticRelationship(
-            name="orders_to_people_by_region",
-            from_table="People",
-            from_column="Region",
-            to_table="Orders",
-            to_column="Region",
-            cardinality="1:N",
-            join_type="INNER",
-            notes="Taxonomy mismatch: People splits Canada (Eastern/Western) vs Orders' single Canada.",
-        ),
-    ]
-    tables = [
-        TableSemanticClassification(
-            name="Orders", table_type="fact",
-            purpose="Transactional fact table (one row per order line).",
-        ),
-        TableSemanticClassification(
-            name="Returns", table_type="fact",
-            purpose="Returned order lines (for net sales logic).",
-        ),
-        TableSemanticClassification(
-            name="People", table_type="governance_mapping",
-            purpose="Region-to-person mapping (viewer RLS anchor).",
-        ),
-    ]
-    return SemanticLayerDocument(
-        version="1.0.0",
-        tables=tables,
-        metrics=metrics,
-        dimensions=dims,
-        relationships=rels,
-        source_sha256="abc",
-        semantic_source_sha256="def",
-        generated_at=datetime(2026, 8, 17, tzinfo=timezone.utc),
-        assumptions=[
-            "net_profit proportionally discounts total_profit by the returned/gross sales ratio.",
-        ],
-    )
-
-
 def test_canonical_document_builds() -> None:
     """Sanity: the canonical content satisfies the document schema."""
-    doc = _build_canonical_document()
+    doc = _load_test_semantic_layer()
     assert len(doc.metrics) == 8
     assert len(doc.dimensions) >= 11
     assert len(doc.relationships) == 2

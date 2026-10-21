@@ -1,64 +1,79 @@
-"""Sanity-check evaluation harness (v1.1).
-
-Runs a small set of sample questions through the full Text-to-SQL pipeline
-and compares the generated SQL (normalized) to the expected SQL. Prints a
-simple pass/fail summary — no per-failure diagnostics or configurable modes.
-
-Reference: specs/002-text-to-sql-v1/research.md Part E
-            specs/002-text-to-sql-v1/contracts/text_to_sql.md
-"""
+"""Result-based evaluation through the interactive governed execution boundary."""
 
 from __future__ import annotations
 
+from collections import Counter
+from collections.abc import Hashable
 import json
-import re
+import logging
 from pathlib import Path
+import re
 
 from src.ai_engineering.pipeline import TextToSqlPipeline
-from src.contracts.text_to_sql import SampleQuestion
+from src.contracts.text_to_sql import NLQuestion, QueryRow, SampleQuestion
+
+
+_logger = logging.getLogger(__name__)
 
 
 def _normalize_sql(sql: str) -> str:
-    """Normalize SQL for comparison: lowercase, collapse whitespace."""
     return re.sub(r"\s+", " ", sql.strip().lower())
 
 
-def run_evaluation(
-    pipeline: TextToSqlPipeline, sample_path: Path
-) -> str:
-    """Run the sanity-check evaluation and return a summary string.
+def _freeze(value: object) -> Hashable:
+    if isinstance(value, list):
+        return ("list", tuple(_freeze(item) for item in value))
+    if isinstance(value, dict):
+        return ("dict", tuple(sorted((key, _freeze(item)) for key, item in value.items())))
+    if isinstance(value, Hashable):
+        return (type(value).__qualname__, value)
+    raise ValueError(f"Unsupported evaluation result type: {type(value).__qualname__}")
 
-    Loads sample questions from `sample_path`, runs each through the pipeline,
-    normalizes the generated SQL, and compares to the expected SQL.
-    Prints `X / N correct` + failed question IDs.
-    """
-    questions_data = json.loads(sample_path.read_text(encoding="utf-8"))
-    questions = [SampleQuestion(**q) for q in questions_data]
 
+def _results(rows: list[QueryRow]) -> Counter[tuple[Hashable, ...]]:
+    # Column aliases and row ordering are presentation, but column positions,
+    # value types, multiplicity and null/empty shapes remain significant.
+    return Counter(tuple(_freeze(value) for value in row.data.values()) for row in rows)
+
+
+def run_evaluation(pipeline: TextToSqlPipeline, sample_path: Path) -> str:
+    questions = [
+        SampleQuestion.model_validate(item)
+        for item in json.loads(sample_path.read_text(encoding="utf-8"))
+    ]
     correct = 0
+    text_matches = 0
     failed_ids: list[str] = []
-
-    for q in questions:
-        from src.contracts.text_to_sql import NLQuestion
-
-        response = pipeline.run(NLQuestion(text=q.question))
-
-        if response.error:
-            failed_ids.append(q.id)
+    diagnostics: list[str] = []
+    for question in questions:
+        response = pipeline.run(NLQuestion(text=question.question))
+        result = response.query_result
+        if (response.error or not response.validation.accepted or result is None or result.error):
+            failed_ids.append(question.id)
+            diagnostics.append(
+                f"{question.id}: {response.error or response.validation.reason or (result.error if result else 'no execution')}"
+            )
             continue
-
-        generated = _normalize_sql(response.generated_sql.sql)
-        expected = q.expected_sql_normalized
-
-        if generated == expected:
+        text_matches += int(_normalize_sql(response.generated_sql.sql) == question.expected_sql_normalized)
+        try:
+            reference = pipeline.execute_reference_sql(
+                question.expected_sql or question.expected_sql_normalized,
+            )
+            equivalent = _results(result.rows) == _results(reference)
+        except Exception as exc:
+            _logger.error("Evaluation reference failed for %s: %s", question.id, exc)
+            equivalent = False
+            diagnostics.append(f"{question.id}: reference failed: {exc}")
+        if equivalent:
             correct += 1
         else:
-            failed_ids.append(q.id)
-
-    total = len(questions)
-    summary = f"{correct} / {total} correct"
+            failed_ids.append(question.id)
+    summary = f"{correct} / {len(questions)} correct"
+    summary += f"\nSQL text matches: {text_matches} / {len(questions)} (diagnostic only)"
     if failed_ids:
         summary += f"\nFailed: {', '.join(failed_ids)}"
+    if diagnostics:
+        summary += "\n" + "\n".join(diagnostics)
     return summary
 
 

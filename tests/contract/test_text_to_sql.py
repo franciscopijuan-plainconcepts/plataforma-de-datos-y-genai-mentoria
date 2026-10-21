@@ -159,7 +159,6 @@ def test_build_prompt_with_semantic_layer_includes_metrics() -> None:
         SemanticRelationship,
         TableSemanticClassification,
     )
-    from src.data_engineering.semantic_layer.metrics import get_metrics
 
     # Minimal dictionary + table_def.
     orders_table_dict = TableDictionary(
