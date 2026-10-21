@@ -173,9 +173,11 @@ def build_prompt(
             f"actuals. Use only the columns listed in the {table_names} schema block "
             "above when querying it.\n"
             f"- If the question asks to COMPARE actuals (Orders) vs forecasts "
-            f"({table_names}) — e.g. by Region or Category — aggregate each table "
-            "separately (each with its own GROUP BY) in its own CTE or subquery, then "
-            "JOIN/UNION the two aggregates by their shared dimension (e.g. Region). "
+            f"({table_names}) — e.g. by Region or Category — aggregate one table with "
+            "GROUP BY and compute the other side in a correlated scalar subquery in "
+            'the SELECT list, e.g. (SELECT SUM(o."Sales") FROM Orders o WHERE '
+            'o."Region" = p."Region"). CTEs (WITH), subqueries in FROM/JOIN and '
+            "UNION are rejected by the validator. "
             "Do NOT join Orders and Predictions row-by-row — Predictions rows are "
             "representative forecast profiles, not one row per historical order."
         )

@@ -12,6 +12,8 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 import pytest
+import sqlglot
+from sqlglot import exp
 
 from src.contracts.data_access import ColumnDef, LogicalType, TableDef
 from src.contracts.semantic_layer import SemanticViewer
@@ -26,6 +28,7 @@ def _orders_table_def() -> TableDef:
     return TableDef(
         name="Orders",
         columns=[
+            ColumnDef(name="Order ID", logical_type=LogicalType.STRING, max_length=50, nullable=False),
             ColumnDef(name="Region", logical_type=LogicalType.STRING, max_length=50, nullable=False),
             ColumnDef(name="Sales", logical_type=LogicalType.DECIMAL, precision=12, scale=4, nullable=False),
         ],
@@ -46,10 +49,7 @@ def _viewer(regions: list[str], allows_full_access: bool = False) -> SemanticVie
 
 
 def test_single_region_injects_in_clause() -> None:
-    """v2.0: RLS predicate is injected directly into the SQL WHERE (not subquery wrap).
-
-    This is robust for aggregation queries (e.g. `SELECT SUM(...) FROM Orders`)
-    that do not expose the Region column in their outer projection."""
+    """Filter the source scan, not the already aggregated output."""
     resolver = SemanticQueryResolver()
     viewer = _viewer(["Caribbean"])
     sql = 'SELECT SUM("Sales") FROM Orders'
@@ -57,7 +57,7 @@ def test_single_region_injects_in_clause() -> None:
     # The injected predicate should appear inside the SQL.
     assert '"Region" IN (\'Caribbean\')' in result
     # The original SQL's SELECT/aggregation should be preserved.
-    assert 'SELECT SUM("Sales") FROM Orders' in result
+    assert 'SELECT SUM("Sales") FROM (SELECT * FROM "Orders" WHERE' in result
     # No subquery wrapping alias should be present.
     assert "_gov" not in result
 
@@ -67,9 +67,11 @@ def test_multiple_regions_join_with_commas() -> None:
     viewer = _viewer(["Caribbean", "Central America"])
     sql = 'SELECT * FROM Orders'
     result = resolver.apply_rls(sql, viewer, _orders_table_def())
-    # No existing WHERE -> inject `WHERE "Region" IN (...)` at the end (before any
-    # GROUP BY / LIMIT, which are absent here).
-    assert result == 'SELECT * FROM Orders WHERE "Region" IN (\'Caribbean\', \'Central America\')'
+    tree = sqlglot.parse_one(result, read="postgres")
+    predicate = tree.find(exp.In)
+    assert predicate is not None
+    assert [item.this for item in predicate.expressions] == ["Caribbean", "Central America"]
+    assert isinstance(predicate.parent, exp.Where)
 
 
 # --- Empty regions => WHERE FALSE (viewer sees 0 rows) -------------------
@@ -83,7 +85,7 @@ def test_empty_regions_returns_where_false() -> None:
     result = resolver.apply_rls(sql, viewer, _orders_table_def())
     assert result.endswith("WHERE FALSE")
     assert "SELECT * FROM (" in result
-    assert 'SELECT SUM("Sales") FROM Orders' in result
+    assert 'SELECT SUM("Sales") FROM (SELECT * FROM "Orders" WHERE FALSE)' in result
 
 
 # --- allows_full_access (only effective in local-dev) -------------------
@@ -129,15 +131,14 @@ def test_full_access_in_non_local_environment_falls_back_to_where_false() -> Non
 # --- Preserve existing WHERE / GROUP BY / LIMIT -------------------------
 
 
-def test_existing_where_ands_predicate() -> None:
-    """When the SQL already has a WHERE, the predicate is AND-ed with the existing one."""
+def test_existing_where_preserved_outside_filtered_scan() -> None:
+    """The existing predicate cannot take precedence over the source restriction."""
     resolver = SemanticQueryResolver()
     viewer = _viewer(["Caribbean"])
     sql = 'SELECT * FROM Orders WHERE "Region" = \'Central US\''
     result = resolver.apply_rls(sql, viewer, _orders_table_def())
-    # The original WHERE should remain in-place, with the new predicate AND-ed.
     assert 'WHERE "Region" = \'Central US\'' in result
-    assert 'AND "Region" IN (\'Caribbean\')' in result
+    assert 'FROM "Orders" WHERE "Region" IN (\'Caribbean\')' in result
 
 
 def test_group_by_is_preserved_inside_subquery() -> None:
@@ -175,7 +176,8 @@ def test_join_to_returns_is_preserved_inside_subquery() -> None:
     result = resolver.apply_rls(sql, viewer, _orders_table_def())
     # The EXISTS subquery should be intact inside the wrapping.
     assert "EXISTS" in result
-    assert "FROM Returns r" in result
+    assert 'FROM "Returns" AS r WHERE r."Order ID" = o."Order ID"' in result
+    assert result.count('"Region" IN') == 1
 
 
 # --- Trailing semicolon handling -----------------------------------------
@@ -191,7 +193,7 @@ def test_trailing_semicolon_is_stripped_in_wrap() -> None:
     # The internal subquery should NOT have the trailing semicolon.
     # The whole result should end with the WHERE clause (no trailing ;).
     assert not result.endswith(";")
-    assert result.endswith("('Caribbean')")
+    assert '"Region" IN (\'Caribbean\')' in result
 
 
 # --- SQL injection defense on `regions` ---------------------------------
@@ -220,7 +222,7 @@ def test_region_with_semicolon_cannot_inject() -> None:
     # The result is a single SELECT — no second statement was injected.
     # The  IS legitimately present inside the single-quoted literal
     # (that is what makes it safe — it cannot terminate the SELECT).
-    assert result.count("SELECT") == 1
+    assert len(sqlglot.parse(result, read="postgres")) == 1
     # No DROP statement was actually introduced at the SQL level — it is only
     # a string literal value.
     assert "DROP TABLE" in result  # yes, but inside the string literal
@@ -248,3 +250,42 @@ def test_resolver_is_pure_no_outputs_to_db() -> None:
     r1 = resolver.apply_rls(sql, viewer, _orders_table_def())
     r2 = resolver.apply_rls(sql, viewer, _orders_table_def())
     assert r1 == r2
+
+
+@pytest.mark.parametrize("subquery", [
+    'SELECT 1 FROM "Returns" r',
+    'SELECT 1 FROM "Returns" r WHERE r."Order ID" = o."Order ID" OR TRUE',
+    'SELECT 1 FROM "Returns" r WHERE r."Order ID" = r."Order ID"',
+    'SELECT 1 FROM "Returns" o WHERE o."Order ID" = o."Order ID"',
+    'SELECT 1 FROM "Returns" r WHERE r."Region" = o."Region"',
+])
+def test_uncorrelated_or_optional_return_link_rejected(subquery: str) -> None:
+    sql = f'SELECT SUM(o."Sales") FROM "Orders" o WHERE EXISTS ({subquery})'
+    with pytest.raises(ValueError, match="Returns subquery"):
+        SemanticQueryResolver().apply_rls(sql, _viewer(["North"]), _orders_table_def())
+
+
+def test_correlated_scalar_return_count_rejected() -> None:
+    sql = ('SELECT (SELECT COUNT(*) FROM "Returns" r WHERE r."Order ID" = o."Order ID") '
+           'FROM "Orders" o')
+    with pytest.raises(ValueError, match="Returns subquery"):
+        SemanticQueryResolver().apply_rls(sql, _viewer(["North"]), _orders_table_def())
+
+
+def test_extra_table_is_region_filtered_under_its_own_name() -> None:
+    """Predictions (004-sales-prediction-model) must not be rewritten to Returns."""
+    predictions = TableDef(
+        name="Predictions",
+        columns=[
+            ColumnDef(name="Predicted Sales", logical_type=LogicalType.DECIMAL, precision=18, scale=2, nullable=False),
+            ColumnDef(name="Region", logical_type=LogicalType.STRING, nullable=False),
+        ],
+        description="Forecasts.",
+    )
+    sql = 'SELECT SUM("Predicted Sales") FROM Predictions'
+    result = SemanticQueryResolver().apply_rls(
+        sql, _viewer(["Caribbean"]), _orders_table_def(),
+        extra_tables={"predictions": predictions},
+    )
+    assert 'FROM (SELECT * FROM "Predictions" WHERE "Region" IN (\'Caribbean\'))' in result
+    assert '"Returns"' not in result

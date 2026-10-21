@@ -1,0 +1,449 @@
+version: 0.2.0.dev0
+name: sales
+datasets:
+- name: Orders
+  source: '"Orders"'
+  primary_key:
+  - row_id
+  description: 'The transactional fact table of the Global Superstore Dataset: one
+    row per order line, capturing sales, discount, profit, customer, product, and
+    regional attributes. Central to the future v1.0/1.1 Text-to-SQL scope (primary
+    query surface) and the v2.0 Semantic Layer (gross/net sales).'
+  fields:
+  - name: category
+    expression:
+      dialects:
+      - dialect: ANSI_SQL
+        expression: '"Category"'
+    dimension:
+      is_time: false
+    description: Top-level product category (Furniture, Office Supplies, Technology).
+    custom_extensions:
+    - vendor_name: PLATAFORMA_DATOS_GENAI
+      data: '{"dimension_type":"categorical","physical_column":"Category","profile_version":1}'
+  - name: city
+    expression:
+      dialects:
+      - dialect: ANSI_SQL
+        expression: '"City"'
+    description: City of the delivery address.
+    custom_extensions:
+    - vendor_name: PLATAFORMA_DATOS_GENAI
+      data: '{"dimension_type":null,"physical_column":"City","profile_version":1}'
+  - name: country
+    expression:
+      dialects:
+      - dialect: ANSI_SQL
+        expression: '"Country"'
+    dimension:
+      is_time: false
+    description: Country of the delivery address.
+    custom_extensions:
+    - vendor_name: PLATAFORMA_DATOS_GENAI
+      data: '{"dimension_type":"geographic","physical_column":"Country","profile_version":1}'
+  - name: customer
+    expression:
+      dialects:
+      - dialect: ANSI_SQL
+        expression: '"Customer Name"'
+    dimension:
+      is_time: false
+    description: Name of the customer who placed the order.
+    custom_extensions:
+    - vendor_name: PLATAFORMA_DATOS_GENAI
+      data: '{"dimension_type":"categorical","physical_column":"Customer Name","profile_version":1}'
+  - name: customer_id
+    expression:
+      dialects:
+      - dialect: ANSI_SQL
+        expression: '"Customer ID"'
+    description: Unique identifier for the customer who placed the order.
+    custom_extensions:
+    - vendor_name: PLATAFORMA_DATOS_GENAI
+      data: '{"dimension_type":null,"physical_column":"Customer ID","profile_version":1}'
+  - name: discount
+    expression:
+      dialects:
+      - dialect: ANSI_SQL
+        expression: '"Discount"'
+    description: Fractional discount applied to the line item (0.0–0.85). Ingredient
+      for net-vs-gross computation in v2.0.
+    custom_extensions:
+    - vendor_name: PLATAFORMA_DATOS_GENAI
+      data: '{"dimension_type":null,"physical_column":"Discount","profile_version":1}'
+  - name: market
+    expression:
+      dialects:
+      - dialect: ANSI_SQL
+        expression: '"Market"'
+    dimension:
+      is_time: false
+    description: Top-level market the order belongs to (Asia Pacific, Europe, Africa,
+      LATAM, USCA).
+    custom_extensions:
+    - vendor_name: PLATAFORMA_DATOS_GENAI
+      data: '{"dimension_type":"geographic","physical_column":"Market","profile_version":1}'
+  - name: order_date
+    expression:
+      dialects:
+      - dialect: ANSI_SQL
+        expression: '"Order Date"'
+    dimension:
+      is_time: true
+    description: Date the order was placed.
+    custom_extensions:
+    - vendor_name: PLATAFORMA_DATOS_GENAI
+      data: '{"dimension_type":"temporal","physical_column":"Order Date","profile_version":1}'
+  - name: order_id
+    expression:
+      dialects:
+      - dialect: ANSI_SQL
+        expression: '"Order ID"'
+    description: Identifier for the order; one order spans multiple line items, so
+      this is not unique per row.
+    custom_extensions:
+    - vendor_name: PLATAFORMA_DATOS_GENAI
+      data: '{"dimension_type":null,"physical_column":"Order ID","profile_version":1}'
+  - name: order_priority
+    expression:
+      dialects:
+      - dialect: ANSI_SQL
+        expression: '"Order Priority"'
+    dimension:
+      is_time: false
+    description: Priority level of the order (Low, Medium, High, Critical).
+    custom_extensions:
+    - vendor_name: PLATAFORMA_DATOS_GENAI
+      data: '{"dimension_type":"categorical","physical_column":"Order Priority","profile_version":1}'
+  - name: postal_code
+    expression:
+      dialects:
+      - dialect: ANSI_SQL
+        expression: '"Postal Code"'
+    description: Postal/ZIP code of the delivery address. Only populated for US/Canada
+      rows (80% NULL).
+    custom_extensions:
+    - vendor_name: PLATAFORMA_DATOS_GENAI
+      data: '{"dimension_type":null,"physical_column":"Postal Code","profile_version":1}'
+  - name: product
+    expression:
+      dialects:
+      - dialect: ANSI_SQL
+        expression: '"Product Name"'
+    dimension:
+      is_time: false
+    description: Human-readable product name.
+    custom_extensions:
+    - vendor_name: PLATAFORMA_DATOS_GENAI
+      data: '{"dimension_type":"categorical","physical_column":"Product Name","profile_version":1}'
+  - name: product_id
+    expression:
+      dialects:
+      - dialect: ANSI_SQL
+        expression: '"Product ID"'
+    description: Unique identifier for the product ordered.
+    custom_extensions:
+    - vendor_name: PLATAFORMA_DATOS_GENAI
+      data: '{"dimension_type":null,"physical_column":"Product ID","profile_version":1}'
+  - name: profit
+    expression:
+      dialects:
+      - dialect: ANSI_SQL
+        expression: '"Profit"'
+    description: Profit for the line item; signed (negative values represent losses).
+      Ingredient for v2.0 business logic.
+    custom_extensions:
+    - vendor_name: PLATAFORMA_DATOS_GENAI
+      data: '{"dimension_type":null,"physical_column":"Profit","profile_version":1}'
+  - name: quantity
+    expression:
+      dialects:
+      - dialect: ANSI_SQL
+        expression: '"Quantity"'
+    description: Number of units ordered for the line item.
+    custom_extensions:
+    - vendor_name: PLATAFORMA_DATOS_GENAI
+      data: '{"dimension_type":null,"physical_column":"Quantity","profile_version":1}'
+  - name: region
+    expression:
+      dialects:
+      - dialect: ANSI_SQL
+        expression: '"Region"'
+    dimension:
+      is_time: false
+    description: Geographic region of the order. Shared with Returns and People —
+      the basis for RLS.
+    custom_extensions:
+    - vendor_name: PLATAFORMA_DATOS_GENAI
+      data: '{"dimension_type":"geographic","physical_column":"Region","profile_version":1}'
+  - name: row_id
+    expression:
+      dialects:
+      - dialect: ANSI_SQL
+        expression: '"Row ID"'
+    description: Unique identifier for each order line (one row per line item within
+      an order).
+    custom_extensions:
+    - vendor_name: PLATAFORMA_DATOS_GENAI
+      data: '{"dimension_type":null,"physical_column":"Row ID","profile_version":1}'
+  - name: sales
+    expression:
+      dialects:
+      - dialect: ANSI_SQL
+        expression: '"Sales"'
+    description: Gross sales revenue for the line item, before returns. Ingredient
+      for v2.0 gross/net sales logic.
+    custom_extensions:
+    - vendor_name: PLATAFORMA_DATOS_GENAI
+      data: '{"dimension_type":null,"physical_column":"Sales","profile_version":1}'
+  - name: segment
+    expression:
+      dialects:
+      - dialect: ANSI_SQL
+        expression: '"Segment"'
+    dimension:
+      is_time: false
+    description: Customer segment (consumer, corporate, home office).
+    custom_extensions:
+    - vendor_name: PLATAFORMA_DATOS_GENAI
+      data: '{"dimension_type":"categorical","physical_column":"Segment","profile_version":1}'
+  - name: ship_date
+    expression:
+      dialects:
+      - dialect: ANSI_SQL
+        expression: '"Ship Date"'
+    description: Date the order was shipped (always on or after Order Date).
+    custom_extensions:
+    - vendor_name: PLATAFORMA_DATOS_GENAI
+      data: '{"dimension_type":null,"physical_column":"Ship Date","profile_version":1}'
+  - name: ship_mode
+    expression:
+      dialects:
+      - dialect: ANSI_SQL
+        expression: '"Ship Mode"'
+    dimension:
+      is_time: false
+    description: Shipping class selected for the order.
+    custom_extensions:
+    - vendor_name: PLATAFORMA_DATOS_GENAI
+      data: '{"dimension_type":"categorical","physical_column":"Ship Mode","profile_version":1}'
+  - name: shipping_cost
+    expression:
+      dialects:
+      - dialect: ANSI_SQL
+        expression: '"Shipping Cost"'
+    description: Cost to ship the line item.
+    custom_extensions:
+    - vendor_name: PLATAFORMA_DATOS_GENAI
+      data: '{"dimension_type":null,"physical_column":"Shipping Cost","profile_version":1}'
+  - name: state
+    expression:
+      dialects:
+      - dialect: ANSI_SQL
+        expression: '"State"'
+    description: State/province of the delivery address.
+    custom_extensions:
+    - vendor_name: PLATAFORMA_DATOS_GENAI
+      data: '{"dimension_type":null,"physical_column":"State","profile_version":1}'
+  - name: sub_category
+    expression:
+      dialects:
+      - dialect: ANSI_SQL
+        expression: '"Sub-Category"'
+    dimension:
+      is_time: false
+    description: Product sub-category (e.g., Binders, Chairs, Phones).
+    custom_extensions:
+    - vendor_name: PLATAFORMA_DATOS_GENAI
+      data: '{"dimension_type":"categorical","physical_column":"Sub-Category","profile_version":1}'
+  custom_extensions:
+  - vendor_name: PLATAFORMA_DATOS_GENAI
+    data: '{"profile_version":1,"table_type":"fact"}'
+- name: People
+  source: '"People"'
+  primary_key:
+  - person
+  description: 'Mapping of regional sales people / managers to the regions they govern.
+    The basis for future v2.0 Row-Level Security: a user may only query data for regions
+    assigned to them.'
+  fields:
+  - name: person
+    expression:
+      dialects:
+      - dialect: ANSI_SQL
+        expression: '"Person"'
+    description: Name of the regional sales person / manager responsible for a region.
+      Primary key. Normalized at load (non-breaking spaces stripped).
+    custom_extensions:
+    - vendor_name: PLATAFORMA_DATOS_GENAI
+      data: '{"dimension_type":null,"physical_column":"Person","profile_version":1}'
+  - name: region
+    expression:
+      dialects:
+      - dialect: ANSI_SQL
+        expression: '"Region"'
+    description: Region the person governs. Shared with Orders/Returns — basis for
+      future v2.0 Row-Level Security (a user may only see data for their assigned
+      regions).
+    custom_extensions:
+    - vendor_name: PLATAFORMA_DATOS_GENAI
+      data: '{"dimension_type":null,"physical_column":"Region","profile_version":1}'
+  custom_extensions:
+  - vendor_name: PLATAFORMA_DATOS_GENAI
+    data: '{"profile_version":1,"table_type":"governance_mapping"}'
+- name: Returns
+  source: '"Returns"'
+  primary_key:
+  - return_id
+  description: Records which orders were returned. Linked to Orders via Order ID.
+    Used in v2.0 to model business logic distinguishing net vs gross sales (a returned
+    order's sales are subtracted from gross to compute net).
+  fields:
+  - name: order_id
+    expression:
+      dialects:
+      - dialect: ANSI_SQL
+        expression: '"Order ID"'
+    description: Identifier of the returned order; links to Orders.Order ID. Not unique
+      (multi-line returns produce duplicates).
+    custom_extensions:
+    - vendor_name: PLATAFORMA_DATOS_GENAI
+      data: '{"dimension_type":null,"physical_column":"Order ID","profile_version":1}'
+  - name: region
+    expression:
+      dialects:
+      - dialect: ANSI_SQL
+        expression: '"Region"'
+    description: Geographic region of the returned order. Shared with Orders and People
+      — basis for future v2.0 RLS.
+    custom_extensions:
+    - vendor_name: PLATAFORMA_DATOS_GENAI
+      data: '{"dimension_type":null,"physical_column":"Region","profile_version":1}'
+  - name: return_id
+    expression:
+      dialects:
+      - dialect: ANSI_SQL
+        expression: '"Return ID"'
+    description: Surrogate primary key assigned at load (row-ordinal). Introduced
+      because Order ID has duplicates (multi-line returns).
+    custom_extensions:
+    - vendor_name: PLATAFORMA_DATOS_GENAI
+      data: '{"dimension_type":null,"physical_column":"Return ID","profile_version":1}'
+  - name: returned
+    expression:
+      dialects:
+      - dialect: ANSI_SQL
+        expression: '"Returned"'
+    description: 'Flag indicating the order was returned. Degenerate: always ''Yes''
+      in the source; the row''s presence itself encodes ''returned''.'
+    custom_extensions:
+    - vendor_name: PLATAFORMA_DATOS_GENAI
+      data: '{"dimension_type":null,"physical_column":"Returned","profile_version":1}'
+  custom_extensions:
+  - vendor_name: PLATAFORMA_DATOS_GENAI
+    data: '{"profile_version":1,"table_type":"fact"}'
+relationships: []
+metrics:
+- name: avg_order_value
+  expression:
+    dialects:
+    - dialect: ANSI_SQL
+      expression: SUM("Sales") / NULLIF(COUNT(DISTINCT "Order ID"), 0)
+  description: 'Average value of a distinct order: gross sales divided by the number
+    of distinct Order IDs.'
+  custom_extensions:
+  - vendor_name: PLATAFORMA_DATOS_GENAI
+    data: '{"aggregation":"EXPRESSION","assumption":null,"derives_from":["gross_sales"],"execution_dialect":"postgres","portability":"platform-profile","profile_version":1,"source_table":"Orders","uses_returns":false}'
+- name: gross_sales
+  expression:
+    dialects:
+    - dialect: ANSI_SQL
+      expression: SUM("Sales")
+  description: Gross sales revenue across all order lines, before subtracting any
+    returned revenue.
+  custom_extensions:
+  - vendor_name: PLATAFORMA_DATOS_GENAI
+    data: '{"aggregation":"SUM","assumption":null,"derives_from":[],"execution_dialect":"postgres","portability":"platform-profile","profile_version":1,"source_table":"Orders","uses_returns":false}'
+- name: net_profit
+  expression:
+    dialects:
+    - dialect: ANSI_SQL
+      expression: SUM("Profit") - (CASE WHEN SUM("Sales") = 0 THEN 0 ELSE (SUM(CASE
+        WHEN EXISTS (SELECT 1 FROM Returns WHERE Returns."Order ID" = Orders."Order
+        ID") THEN "Sales" ELSE 0 END) / SUM("Sales")) * SUM("Profit") END)
+  description: 'Net profit: total profit minus the proportion of profit corresponding
+    to returned order lines.'
+  custom_extensions:
+  - vendor_name: PLATAFORMA_DATOS_GENAI
+    data: '{"aggregation":"EXPRESSION","assumption":"Proportionally discounts total_profit
+      by the fraction of sales that was returned (returned_amount / gross_sales *
+      total_profit). Assumes returned lines have no independent profit record; a more
+      precise subquery-based formula is documented for v3.0+.","derives_from":["total_profit","returned_amount"],"execution_dialect":"postgres","portability":"platform-profile","profile_version":1,"source_table":"Orders","uses_returns":true}'
+- name: net_sales
+  expression:
+    dialects:
+    - dialect: ANSI_SQL
+      expression: SUM(CASE WHEN NOT EXISTS (SELECT 1 FROM Returns WHERE Returns."Order
+        ID" = Orders."Order ID") THEN "Sales" ELSE 0 END)
+  description: 'Net sales revenue: gross sales minus returned order-line revenue.'
+  custom_extensions:
+  - vendor_name: PLATAFORMA_DATOS_GENAI
+    data: '{"aggregation":"EXPRESSION","assumption":null,"derives_from":["gross_sales","returned_amount"],"execution_dialect":"postgres","portability":"platform-profile","profile_version":1,"source_table":"Orders","uses_returns":true}'
+- name: order_count
+  expression:
+    dialects:
+    - dialect: ANSI_SQL
+      expression: COUNT(DISTINCT "Order ID")
+  description: Number of distinct orders (by Order ID).
+  custom_extensions:
+  - vendor_name: PLATAFORMA_DATOS_GENAI
+    data: '{"aggregation":"COUNT_DISTINCT","assumption":null,"derives_from":[],"execution_dialect":"postgres","portability":"platform-profile","profile_version":1,"source_table":"Orders","uses_returns":false}'
+- name: return_rate
+  expression:
+    dialects:
+    - dialect: ANSI_SQL
+      expression: CASE WHEN SUM("Sales") = 0 THEN NULL ELSE SUM(CASE WHEN EXISTS (SELECT
+        1 FROM Returns WHERE Returns."Order ID" = Orders."Order ID") THEN "Sales"
+        ELSE 0 END) / SUM("Sales") END
+  description: 'Fraction of gross sales that was returned: returned_amount / gross_sales.'
+  custom_extensions:
+  - vendor_name: PLATAFORMA_DATOS_GENAI
+    data: '{"aggregation":"RATIO","assumption":null,"derives_from":["returned_amount","gross_sales"],"execution_dialect":"postgres","portability":"platform-profile","profile_version":1,"source_table":"Orders","uses_returns":true}'
+- name: returned_amount
+  expression:
+    dialects:
+    - dialect: ANSI_SQL
+      expression: SUM(CASE WHEN EXISTS (SELECT 1 FROM Returns WHERE Returns."Order
+        ID" = Orders."Order ID") THEN "Sales" ELSE 0 END)
+  description: Total sales revenue of order lines that were returned (have a matching
+    entry in the Returns table by Order ID).
+  custom_extensions:
+  - vendor_name: PLATAFORMA_DATOS_GENAI
+    data: '{"aggregation":"EXPRESSION","assumption":"A line is considered returned
+      if at least one Returns row matches its Order ID. Because Returns.\"Order ID\"
+      has duplicates (multi-line returns), EXISTS is used instead of JOIN to avoid
+      inflating rows.","derives_from":[],"execution_dialect":"postgres","portability":"platform-profile","profile_version":1,"source_table":"Orders","uses_returns":true}'
+- name: total_profit
+  expression:
+    dialects:
+    - dialect: ANSI_SQL
+      expression: SUM("Profit")
+  description: Sum of signed profit across all order lines (negatives are losses).
+  custom_extensions:
+  - vendor_name: PLATAFORMA_DATOS_GENAI
+    data: '{"aggregation":"SUM","assumption":null,"derives_from":[],"execution_dialect":"postgres","portability":"platform-profile","profile_version":1,"source_table":"Orders","uses_returns":false}'
+custom_extensions:
+- vendor_name: PLATAFORMA_DATOS_GENAI
+  data: '{"associations":[{"cardinality":"N:1","from_column":"Order ID","from_table":"Returns","join_type":"LEFT","name":"orders_to_returns","notes":"Returns.\"Order
+    ID\" has 63 duplicate values across 2,033 rows (multi-line returns) \u2014 use
+    EXISTS instead of direct JOIN to avoid inflating Orders rows.","to_column":"Order
+    ID","to_table":"Orders"},{"cardinality":"1:N","from_column":"Region","from_table":"People","join_type":"INNER","name":"orders_to_people_by_region","notes":"Taxonomy
+    mismatch: People splits Canada into Eastern/Western Canada vs Orders'' single
+    Canada (23 unique). Resolution is v3.0+ scope; the resolver is conservative \u2014
+    a viewer scoped to ''Eastern Canada'' sees 0 Orders rows.","to_column":"Region","to_table":"Orders"}],"assumptions":["returned_amount:
+    A line is considered returned if at least one Returns row matches its Order ID.
+    Because Returns.\"Order ID\" has duplicates (multi-line returns), EXISTS is used
+    instead of JOIN to avoid inflating rows.","net_profit: Proportionally discounts
+    total_profit by the fraction of sales that was returned (returned_amount / gross_sales
+    * total_profit). Assumes returned lines have no independent profit record; a more
+    precise subquery-based formula is documented for v3.0+."],"content_version":"1.0.0","profile_version":1,"required_profile":"PLATAFORMA_DATOS_GENAI","semantic_source_sha256":"e40350ee0d0b56a3b8c0cf0323650ee6217c83a530e5045dfc9ea429fddd0bba","source_sha256":"d7a805f6cfd26339f478a3de6a6f128ea156179be093e09a1f528776fd5fdc3e"}'

@@ -3,14 +3,14 @@
 Defines the typed contracts of the Semantic Layer v2.0:
 - `Metric`, `Dimension`, `SemanticRelationship`, `TableSemanticClassification`
   — the declarative artifact content.
-- `SemanticLayerDocument` — the top-level artifact produced by the builder.
+- `SemanticLayerDocument` — the typed projection loaded from canonical Ossie.
 - `SemanticViewer` — runtime governance context (loaded from `viewers.yaml`).
 - `SemanticQueryResolverProtocol` — the typed interface of the pure
   `apply_rls(sql, viewer, table_def) -> str` resolver.
 
 These are the SOLE currency that crosses the Semantic Layer boundary. The
 AI Engineering domain (`src/ai_engineering/`) depends on these models and
-the `QueryProvider` Protocol — it does NOT import
+the governed execution Protocol — it does NOT import
 `src/data_engineering/semantic_layer/` directly (constitution Principle II).
 The resolver implementation lives in `src/data_engineering/semantic_layer/`
 and is injected at the CLI composition root.
@@ -153,8 +153,19 @@ class SemanticViewer(BaseModel):
     is_local_dev: bool = False
 
 
+class SemanticModelProvenance(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    model_sha256: str
+    ossie_revision: str
+    source_sha256: str
+    semantic_source_sha256: str
+    code_revision: str | None = None
+    code_dirty: bool | None = None
+
+
 class SemanticLayerDocument(BaseModel):
-    """The top-level Semantic Layer artifact.
+    """Typed consumption projection of the canonical semantic model.
 
     Reference: data-model.md § 5. Captures tables, metrics, dimensions,
     relationships, provenance hashes, and assumptions. `viewers` are NOT part
@@ -172,6 +183,7 @@ class SemanticLayerDocument(BaseModel):
     semantic_source_sha256: str
     generated_at: datetime
     assumptions: list[str] = []
+    provenance: SemanticModelProvenance | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -196,6 +208,7 @@ class SemanticQueryResolverProtocol(Protocol):
         sql: str,
         viewer: SemanticViewer,
         table_def: TableDef,
+        extra_tables: dict[str, TableDef] | None = None,
     ) -> str:
         """Return the SQL wrapped with a `Region IN (viewer.regions)` filter.
 
@@ -203,8 +216,10 @@ class SemanticQueryResolverProtocol(Protocol):
           is True, logs a `gov.bypass` event and returns the SQL unchanged.
         - If `viewer.regions` is empty (and not full-access), returns SQL
           producing 0 rows (outer `WHERE FALSE`).
-        - Otherwise wraps the input SQL in a subquery and applies an
-          outer `WHERE "Region" IN (...)` clause.
+        - Otherwise restricts analytic scans before aggregation; the supported
+          order-linked Returns existence check preserves its legacy semantics.
+        - `extra_tables` (e.g. Predictions) are admitted and Region-filtered
+          like `table_def`.
         """
         ...
 
@@ -222,5 +237,6 @@ __all__ = [
     "TableSemanticClassification",
     "SemanticViewer",
     "SemanticLayerDocument",
+    "SemanticModelProvenance",
     "SemanticQueryResolverProtocol",
 ]

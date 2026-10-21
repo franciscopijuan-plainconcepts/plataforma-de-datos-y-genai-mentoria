@@ -537,9 +537,11 @@ class MetabaseClient:
                 "send_governed_query called without collection_id; skipping Metabase card."
             )
             return None
-        if response.query_result is None:
+        if (response.error or not response.validation.accepted
+                or response.query_result is None or response.query_result.error
+                or not response.query_result.sql.strip() or viewer is None):
             _logger.info(
-                "send_governed_query called with no query_result (rejected SQL?); skipping."
+                "send_governed_query refused publication without successful governed execution."
             )
             return None
 
@@ -556,8 +558,11 @@ class MetabaseClient:
         )
         description = (
             f"viewer_id={viewer_id} gov_bypass={gov_bypass} "
+            f"regions={list(viewer.regions)!r} model_sha256={response.query_result.model_sha256} "
             f"created_at={datetime.now(timezone.utc).isoformat()}"
         )
+        if response.query_result.provenance is not None:
+            description += f" ossie_revision={response.query_result.provenance.ossie_revision}"
 
         display = self._infer_display_type(response)
         card = self.create_card(

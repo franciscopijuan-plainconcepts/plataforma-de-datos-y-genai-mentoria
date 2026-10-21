@@ -46,6 +46,25 @@ _ALLOWED_OPENAI_DIR = _REPO_ROOT / "src" / "ai_engineering"
 _ALLOWED_YAML_DIR = _REPO_ROOT / "src" / "data_engineering" / "semantic_layer"
 
 
+@pytest.mark.parametrize("dependency, allowed", [
+    ("ossie", {"src/data_engineering/semantic_layer/ossie.py"}),
+    ("jsonschema", {"src/data_engineering/semantic_layer/ossie.py"}),
+    ("sqlglot", {
+        "src/data_engineering/semantic_layer/ossie.py",
+        "src/data_engineering/semantic_layer/resolver.py",
+        "src/data_access/sql_validator.py",
+    }),
+])
+def test_ossie_and_sql_parser_boundaries(dependency: str, allowed: set[str]) -> None:
+    offenders = [
+        str(path.relative_to(_REPO_ROOT))
+        for path in _iter_python_files(_REPO_ROOT / "src")
+        if dependency in _top_level_modules(path)
+        and str(path.relative_to(_REPO_ROOT)) not in allowed
+    ]
+    assert not offenders, f"{dependency} escaped its boundary: {offenders}"
+
+
 def _iter_python_files(root: Path) -> list[Path]:
     """Yield all `.py` files under `root`, excluding __pycache__."""
     if not root.exists():

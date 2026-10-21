@@ -1,4 +1,4 @@
-"""Governed QueryProvider decorator + fail-fast safety net (v2.0).
+"""Request-scoped governed preparation, execution and QueryProvider compatibility.
 
 The `GovernedQueryProvider` wraps any `QueryProvider` and enforces Row-Level
 Security on every `execute_readonly_query` call by running the input SQL
@@ -20,20 +20,19 @@ from __future__ import annotations
 from src.contracts.data_access import TableDef
 from src.contracts.semantic_layer import (
     SemanticQueryResolverProtocol,
+    SemanticModelProvenance,
     SemanticViewer,
 )
-from src.contracts.text_to_sql import QueryRow
+from src.contracts.text_to_sql import GovernedExecutionProvider, PreparedQuery, QueryRow
 from src.data_access.interfaces import QueryProvider
 
 
 class GovernedQueryProvider:
     """Decorator over `QueryProvider` that enforces Semantic Layer RLS.
 
-    Implements the `QueryProvider` Protocol. Every call to
-    `execute_readonly_query` is intercepted: the SQL is transformed by the
-    injected `SemanticQueryResolverProtocol` (subquery wrapping with the
-    `WHERE "Region" IN (...)` clause per the viewer's regions) before being
-    delegated to the wrapped `QueryProvider` (e.g., `PostgresRepository`).
+    Implements both the legacy QueryProvider and the narrow governed boundary.
+    Preparation transforms and validates once. Prepared execution delegates the
+    exact captured SQL without rewriting it again.
 
     The wrapped provider executes the GOVERNED SQL — it has no awareness of
     RLS. This keeps the adapter engine-agnostic (the future BigQuery adapter
@@ -46,23 +45,43 @@ class GovernedQueryProvider:
         resolver: SemanticQueryResolverProtocol,
         viewer: SemanticViewer,
         table_def: TableDef,
+        model_sha256: str | None = None,
+        provenance: SemanticModelProvenance | None = None,
+        extra_tables: dict[str, TableDef] | None = None,
     ) -> None:
         self._delegate = delegate
         self._resolver = resolver
-        self._viewer = viewer
-        self._table_def = table_def
+        self._viewer = viewer.model_copy(deep=True)
+        self._table_def = table_def.model_copy(deep=True)
+        if provenance is not None and model_sha256 not in {None, provenance.model_sha256}:
+            raise ValueError("Conflicting semantic model hashes")
+        self._model_sha256 = provenance.model_sha256 if provenance is not None else model_sha256
+        self._provenance = provenance
+        self._extra_tables = {name: definition.model_copy(deep=True)
+                              for name, definition in (extra_tables or {}).items()}
+
+    def prepare_query(self, sql: str, table_def: TableDef) -> PreparedQuery:
+        if table_def != self._table_def:
+            raise ValueError("Query schema differs from the governed provider schema")
+        governed_sql = self._resolver.apply_rls(
+            sql, self._viewer, table_def, extra_tables=self._extra_tables
+        )
+        return PreparedQuery(generated_sql=sql, sql=governed_sql,
+                             viewer=self._viewer.model_copy(deep=True),
+                             model_sha256=self._model_sha256, provenance=self._provenance)
+
+    def execute_prepared_query(self, query: PreparedQuery, table_def: TableDef) -> list[QueryRow]:
+        if (query.viewer != self._viewer or query.model_sha256 != self._model_sha256
+                or query.provenance != self._provenance
+                or table_def != self._table_def):
+            raise ValueError("Prepared query context differs from the executor context")
+        return self._delegate.execute_readonly_query(query.sql, table_def)
 
     def execute_readonly_query(
         self, sql: str, table_def: TableDef
     ) -> list[QueryRow]:
-        """Apply RLS to the SQL, then delegate execution to the wrapped provider.
-
-        The caller is the `TextToSqlPipeline`, which has ALREADY validated
-        the SQL via `SqlValidator` before calling this method. The resolver
-        is therefore operating on known-safe SELECT SQL.
-        """
-        governed_sql = self._resolver.apply_rls(sql, self._viewer, table_def)
-        return self._delegate.execute_readonly_query(governed_sql, table_def)
+        """Compatibility entrypoint; interactive pipelines use explicit preparation."""
+        return self.execute_prepared_query(self.prepare_query(sql, table_def), table_def)
 
 
 class _UngovernedFailFastProvider:
@@ -83,14 +102,23 @@ class _UngovernedFailFastProvider:
     ) -> list[QueryRow]:
         raise ValueError(self._MESSAGE)
 
+    def prepare_query(self, sql: str, table_def: TableDef) -> PreparedQuery:
+        raise ValueError(self._MESSAGE)
+
+    def execute_prepared_query(self, query: PreparedQuery, table_def: TableDef) -> list[QueryRow]:
+        raise ValueError(self._MESSAGE)
+
 
 def build_governed_provider(
     delegate: QueryProvider,
     resolver: SemanticQueryResolverProtocol,
     viewer: SemanticViewer | None,
     table_def: TableDef,
-) -> QueryProvider:
-    """CLI composition-root helper: wire the right `QueryProvider` for the viewer.
+    model_sha256: str | None = None,
+    provenance: SemanticModelProvenance | None = None,
+    extra_tables: dict[str, TableDef] | None = None,
+) -> GovernedExecutionProvider:
+    """CLI composition-root helper: require a viewer for governed execution.
 
     Returns:
         - `GovernedQueryProvider` wrapping `delegate` when `viewer` is provided.
@@ -107,6 +135,9 @@ def build_governed_provider(
         resolver=resolver,
         viewer=viewer,
         table_def=table_def,
+        model_sha256=model_sha256,
+        provenance=provenance,
+        extra_tables=extra_tables,
     )
 
 

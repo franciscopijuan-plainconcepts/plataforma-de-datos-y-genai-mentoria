@@ -222,10 +222,30 @@ flags, and cross-table relationships.
 uv run python -m src.cli.main generate-semantic-layer
 ```
 
-**What this does**: produces `.artifacts/semantic_layer.json` (canonical,
-deterministic JSON) and `.artifacts/semantic_layer.md` (human-readable) —
+**What this does**: reads `semantic/sales.ossie.yaml` and produces
+`.artifacts/semantic_layer.json` (deterministic derivative) and
+`.artifacts/semantic_layer.md` (human-readable) —
 declaring 8 business metrics (gross_sales, net_sales, return_rate, etc.),
-11 dimensions, and 2 cross-table relationships.
+11 dimensions, and 2 compatibility associations.
+
+**Semantic authority is Apache Ossie**:
+[`semantic/sales.ossie.yaml`](semantic/sales.ossie.yaml) is the only editable
+business model. It uses pinned Apache Ossie `0.2.0.dev0` with a PostgreSQL
+compatibility profile; it is not universally portable SQL. Missing, invalid or
+incompatible models fail before LLM calls or business SQL, with no automatic
+legacy fallback. Do not edit the JSON/Markdown derivatives to change definitions.
+Export a normalized copy explicitly (existing files are never overwritten):
+
+```bash
+uv run --frozen python -m src.cli.main generate-semantic-layer \
+  --export-ossie /tmp/new-sales.ossie.yaml
+```
+
+Use `.yaml`/`.yml` for YAML, otherwise JSON. See
+[migration status, evidence and limitations](docs/semantic-migration.md).
+The existing uv/Python 3.13.14 environment is the tested acceptance runtime;
+the declared Python minimum has not been raised and other runtimes are not
+claimed as certified by this migration.
 
 ### Step 7: Wait for Metabase to become healthy
 
@@ -351,7 +371,12 @@ uv run python -m src.cli.main seed-sales-predictions --env prod --force
 
 Re-runs the batch forecast seeding manually (e.g. after promoting a new run in Step 11, or to target a different `--env`/`--months-ahead`). `--force` bypasses the idempotency check that `bootstrap` relies on.
 
-See [`specs/001-data-genai-platform-baseline/quickstart.md`](specs/001-data-genai-platform-baseline/quickstart.md) for the baseline validation guide, [`specs/003-semantic-layer-v1/quickstart.md`](specs/003-semantic-layer-v1/quickstart.md) for Semantic Layer validation, [`specs/004-metabase-integration/quickstart.md`](specs/004-metabase-integration/quickstart.md) for the Metabase workflow, and [`specs/004-sales-prediction-model/quickstart.md`](specs/004-sales-prediction-model/quickstart.md) for the sales-prediction train → promote → predict flow.
+See [Ossie migration validation and limitations](docs/semantic-migration.md) for
+the current semantic workflow. The historical feature guides remain available:
+[`baseline`](specs/001-data-genai-platform-baseline/quickstart.md),
+[`Semantic Layer v2`](specs/003-semantic-layer-v1/quickstart.md),
+[`Metabase`](specs/004-metabase-integration/quickstart.md) and
+[`sales prediction`](specs/004-sales-prediction-model/quickstart.md).
 
 ---
 
@@ -496,8 +521,22 @@ summary (`X / N correct`).
 | `ask --viewer <id>` | Login as a person (from the `People` table) and scope results to that person's region. |
 | `ask --allow-full-access` | Escape hatch for local/dev only (no RLS filtering). Logged as `gov.bypass`. |
 | `ask --no-metabase` | Skip Metabase card creation for this single `ask`. |
+| `ask --json --no-metabase` | Emit a typed response on stdout, progress on stderr, with effective SQL and nonzero status on rejection/execution failure; no integrated card. |
 | `ask --session <id>` | Group the card into a "Session: \<id\>" dashboard in Metabase. |
-| `evaluate` | Run the v1.1 sanity-check evaluation (~10 sample questions). |
+| `evaluate --viewer <id>` | Evaluate sample questions with the same semantic context and governance as `ask`, comparing execution results. |
+| `evaluate --allow-full-access` | Explicit local/dev/test-only evaluation bypass, logged like interactive bypass. |
+
+Metabase publication uses the exact executed SQL and occurs only after successful
+execution. A saved card captures the originating viewer's regional scope; it does
+not dynamically enforce later revocation or authorize other Metabase users.
+The web bridge disables integrated publication to avoid duplicate cards. Its
+manual `--sql` mode is **not governed** and is intended only for trusted local use.
+
+Evaluation retains `expected_sql_normalized` as a text diagnostic. Sample inputs
+may also provide `expected_sql` with executable, correctly cased identifiers;
+otherwise the existing normalized field is used as the reference SQL. Reference
+errors count as failures, never successes. Comparison preserves types, column
+positions and row multiplicity, ignoring presentation aliases and row order.
 
 ### Environment variables
 
@@ -549,6 +588,8 @@ docker/docker-compose.yml defines two services:
 
 ```text
 docker/                           # Docker Compose (PostgreSQL + Metabase)
+semantic/
+  sales.ossie.yaml                 # Sole editable semantic model (pinned Ossie profile)
 src/
   contracts/                      # Shared typed contracts (Pydantic v2)
     data_access.py                #   TableDef, ColumnDef, Row models
@@ -563,8 +604,8 @@ src/
     eda/                          #   EDA explorer + schema inferrer
     ingestion/                    #   Loader + manifest
     validation/                   #   Validator
-    semantic_layer/               #   Semantic Layer (builder, resolver, governed_provider,
-                                  #   registry, metrics, render, person_resolver)
+    semantic_layer/               #   Ossie boundary/schema, resolver, governed_provider,
+                                  #   registry, render, person_resolver
   ai_engineering/                 # AI Engineering domain
     llm_client.py                 #   Typed wrapper around OpenAI SDK (Forge proxy)
     prompt_builder.py             #   Builds LLM prompt from dictionary + semantic layer
@@ -593,7 +634,7 @@ specs/                            # Feature specs (spec.md, plan.md, research.md
   004-sales-prediction-model/
 .artifacts/                       # Runtime artifacts
   load_manifest.json              #   Provenance for the loaded data
-  semantic_layer.json             #   Canonical, deterministic Semantic Layer artifact
+  semantic_layer.json             #   Deterministic derivative of canonical Ossie
   semantic_layer.md               #   Human-readable Semantic Layer
   metabase_state.json             #   Metabase setup state cache (idempotency)
   text_to_sql.log                 #   Structured log per ask call
