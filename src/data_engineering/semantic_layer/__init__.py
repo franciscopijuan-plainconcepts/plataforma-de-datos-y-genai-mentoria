@@ -1,7 +1,7 @@
-"""Semantic Layer subpackage (v2.0).
+"""Semantic model interchange, governance and consumption derivatives.
 
-Hosts the Semantic Layer implementation: builder, resolver, registry,
-governed provider, metrics canonization, and renderer. The contract models
+Hosts the Ossie boundary, resolver, registry, governed provider and renderer.
+Business definitions live in semantic/sales.ossie.yaml. The contract models
 live in `src/contracts/semantic_layer.py` (typed boundary).
 
 Reference: specs/003-semantic-layer-v1/plan.md

@@ -281,6 +281,56 @@ def test_send_governed_query_creates_card_on_success() -> None:
     assert "gov_bypass=False" in card.description
 
 
+@pytest.mark.parametrize("failure", ["execution", "validation", "top-level", "viewer"])
+def test_send_governed_query_refuses_failed_context(failure: str) -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json={})
+
+    client = _client_with_handler(handler)
+    candidate = _build_response([], 'SELECT COUNT(*) FROM "Orders"')
+    viewer: SemanticViewer | None = SemanticViewer(viewer_id="north", regions=["North"])
+    assert candidate.query_result is not None
+    if failure == "execution":
+        candidate = candidate.model_copy(update={"query_result": candidate.query_result.model_copy(update={"error": "failed"})})
+    elif failure == "validation":
+        candidate = candidate.model_copy(update={"validation": ValidationResult(accepted=False, sql="", reason="Rejected")})
+    elif failure == "top-level":
+        candidate = candidate.model_copy(update={"error": "failed"})
+    else:
+        viewer = None
+    assert client.send_governed_query(candidate, viewer, collection_id=7) is None
+    assert requests == []
+
+
+def test_metabase_payload_is_effective_not_generated_sql() -> None:
+    import json
+
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json={"id": 100, "name": "sales", "display": "table"})
+
+    client = _client_with_handler(handler)
+    client._session_token = "test-token"
+    candidate = _build_response([], 'SELECT SUM("Sales") FROM "Orders"')
+    assert candidate.query_result is not None
+    effective = candidate.generated_sql.sql + ' WHERE "Region" IN (\'North\')'
+    candidate = candidate.model_copy(update={
+        "query_result": candidate.query_result.model_copy(update={"sql": effective, "model_sha256": "model-sha"}),
+    })
+    card = client.send_governed_query(
+        candidate, SemanticViewer(viewer_id="north", regions=["North"]), collection_id=7,
+    )
+    assert card is not None
+    payload = json.loads(requests[0].content)
+    assert payload["dataset_query"]["native"]["query"] == effective
+    assert "model_sha256=model-sha" in payload["description"]
+
+
 # --- _infer_display_type heuristics (T021) -----------------------------
 
 

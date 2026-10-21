@@ -2,6 +2,16 @@
 
 Documento vivo para seguimiento del estado actual, decisiones clave, riesgos y siguientes hitos de la Plataforma de Datos y GenAI.
 
+## Migracion Ossie en la rama de trabajo (sin publicar)
+
+La fuente semantica vigente es [semantic/sales.ossie.yaml](semantic/sales.ossie.yaml).
+Se retiraron las definiciones Python redundantes; JSON/Markdown son derivados,
+no fuentes alternativas. La ejecucion conserva SQL gobernado trazable y la
+evaluacion compara resultados bajo el mismo alcance.
+Ver [evidencia, aprobaciones y limites](docs/semantic-migration.md).
+El snapshot v3.0 siguiente documenta la entrega anterior, no estas modificaciones
+pendientes del commit/push/PR del usuario.
+
 ## Estado actual (snapshot)
 
 - Fecha de actualizacion: 2026-09-01

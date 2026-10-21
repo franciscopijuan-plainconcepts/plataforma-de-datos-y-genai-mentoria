@@ -2,7 +2,7 @@
 
 These models are the sole currency that crosses the AI Engineering boundary.
 The AI Engineering domain (`src/ai_engineering/`) depends on these models
-and the `QueryProvider` Protocol — it does NOT import `openai`, `psycopg`,
+and the governed execution Protocol — it does NOT import `openai`, `psycopg`,
 or `pandas` directly (constitution Principles I, II, III).
 
 Reference: specs/002-text-to-sql-v1/contracts/text_to_sql.md
@@ -12,11 +12,12 @@ Reference: specs/002-text-to-sql-v1/contracts/text_to_sql.md
 from __future__ import annotations
 
 import os
-from typing import Any
+from typing import Any, Protocol, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from src.contracts.data_access import TableDef
+from src.contracts.semantic_layer import SemanticModelProvenance, SemanticViewer
 
 
 class LlmConfig(BaseModel):
@@ -116,6 +117,29 @@ class QueryResult(BaseModel):
     row_count: int
     latency_ms: int
     error: str | None = None  # None if successful; the DB error message if failed
+    model_sha256: str | None = None
+    provenance: SemanticModelProvenance | None = None
+
+
+class PreparedQuery(BaseModel):
+    """Immutable request-scoped SQL and access snapshot; no SDK models or secrets."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    generated_sql: str
+    sql: str
+    viewer: SemanticViewer
+    model_sha256: str | None = None
+    provenance: SemanticModelProvenance | None = None
+
+
+@runtime_checkable
+class GovernedExecutionProvider(Protocol):
+    def prepare_query(self, sql: str, table_def: TableDef) -> PreparedQuery: ...
+
+    def execute_prepared_query(self, query: PreparedQuery, table_def: TableDef) -> list[QueryRow]: ...
+
+    def execute_readonly_query(self, sql: str, table_def: TableDef) -> list[QueryRow]: ...
 
 
 class TextToSqlRequest(BaseModel):
@@ -153,10 +177,10 @@ class TextToSqlResponse(BaseModel):
 
 
 class SampleQuestion(BaseModel):
-    """A sample evaluation item (v1.1 sanity-check only).
+    """A sample evaluation item with optional case-preserving executable SQL.
 
-    The `expected_sql_normalized` is the expected SQL, normalized (lowercase,
-    whitespace-collapsed) for comparison with the generated SQL.
+    Normalized SQL remains a text diagnostic and a fallback reference for older
+    input files. Result comparison, not text equality, determines success.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -164,6 +188,7 @@ class SampleQuestion(BaseModel):
     id: str
     question: str
     expected_sql_normalized: str
+    expected_sql: str | None = None
 
 
 __all__ = [
@@ -173,6 +198,8 @@ __all__ = [
     "ValidationResult",
     "QueryRow",
     "QueryResult",
+    "PreparedQuery",
+    "GovernedExecutionProvider",
     "TextToSqlRequest",
     "TextToSqlResponse",
     "SampleQuestion",

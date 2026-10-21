@@ -15,6 +15,9 @@ dependencies = [
     "scikit-learn>=1.9",
     "catboost>=1.2.10",
     "matplotlib>=3.9",
+    "apache-ossie @ git+https://github.com/apache/ossie.git@8551d85b20eccbbe6ce2a38e51b8ba6309a3e05e#subdirectory=python",
+    "jsonschema>=4.26",
+    "sqlglot>=30.12",
 ]
 
 [project.optional-dependencies]
@@ -32,6 +35,9 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src"]
+
+[tool.hatch.metadata]
+allow-direct-references = true
 
 [tool.mypy]
 python_version = "3.13"
@@ -80,6 +86,10 @@ ignore_missing_imports = true
 module = "matplotlib.*"
 ignore_missing_imports = true
 
+[[tool.mypy.overrides]]
+module = ["ossie.*", "yaml.*", "jsonschema.*"]
+follow_untyped_imports = true
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = ["test_*.py"]
@@ -90,4 +100,6 @@ python_functions = ["test_*"]
 dev = [
     "pytest>=8.0",
     "mypy>=1.10",
+    "types-pyyaml>=6.0.12.20260906",
+    "types-jsonschema>=4.26.0.20261006",
 ]

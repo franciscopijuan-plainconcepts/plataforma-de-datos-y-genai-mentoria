@@ -1,7 +1,7 @@
-"""Semantic Layer renderer (v2.0) — serializes the document to two artifacts.
+"""Semantic Layer renderer — creates consumption/documentation derivatives.
 
-- `render_json(document) -> str` : canonical, deterministic JSON (no
-  `generated_at`, no `viewers`) — for git-diffability and SC-005 determinism.
+- `render_json(document) -> str` : deterministic derived JSON (no
+  `generated_at`, no `viewers`) — not an editable semantic source.
 - `render_markdown(document) -> str` : human-readable Markdown with the
   timestamp, hashes, assumptions, full formulas, relationships, DQ notes.
 
@@ -19,14 +19,14 @@ import json
 from src.contracts.semantic_layer import SemanticLayerDocument
 
 
-# Fields excluded from the canonical JSON artifact for determinism (FR-007 / SC-005):
+# Fields excluded from the JSON derivative for determinism (FR-007 / SC-005):
 #  - `generated_at` : contains a timestamp — would break byte-determinism
 #                     across runs with the same inputs.
 _JSON_EXCLUDE_FIELDS: set[str] = {"generated_at"}
 
 
 def render_json(document: SemanticLayerDocument) -> str:
-    """Render a canonical, deterministic JSON string.
+    """Render a deterministic consumption JSON string.
 
     The JSON excludes `generated_at` (timestamp — non-deterministic) and
     uses `sort_keys=True` + `exclude_none=True` + `ensure_ascii=False` so
@@ -62,6 +62,12 @@ def render_markdown(document: SemanticLayerDocument) -> str:
         f"`{document.semantic_source_sha256}`"
     )
     lines.append("")
+    if document.provenance is not None:
+        lines.append(f"- **Semantic model SHA-256**: `{document.provenance.model_sha256}`")
+        lines.append(f"- **Ossie revision**: `{document.provenance.ossie_revision}`")
+        lines.append(f"- **Code revision**: `{document.provenance.code_revision or 'unavailable'}`")
+        lines.append(f"- **Code worktree dirty**: `{document.provenance.code_dirty}`")
+        lines.append("")
     lines.append(
         "> Regeneratable via `uv run python -m src.cli.main generate-semantic-layer` (FR-008). "
         "The JSON artifact is deterministic (no `generated_at` field); this Markdown "

@@ -22,6 +22,8 @@ import os
 import subprocess
 import sys
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager, redirect_stdout
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
@@ -44,6 +46,8 @@ from src.data_engineering.ingestion.manifest import (
 )
 
 if TYPE_CHECKING:
+    from src.contracts.dictionary import DataDictionaryDocument
+    from src.ai_engineering.pipeline import TextToSqlPipeline
     # Avoid top-level import cycle: MetabaseSession is used only in type hints
     # of private helpers that are invoked after the runtime import inside the
     # commands (e.g., `from src.contracts.metabase import MetabaseSession`).
@@ -55,10 +59,10 @@ _COMPOSE_FILE = _REPO_ROOT / "docker" / "docker-compose.yml"
 _DEFAULT_SOURCE = _REPO_ROOT / "Global Superstore Data.xlsx"
 _MANIFEST_PATH = _REPO_ROOT / ".artifacts" / "load_manifest.json"
 _DICTIONARY_PATH = _REPO_ROOT / "data_dictionary.md"
-# v2.0 Semantic Layer artifacts (regeneratable via generate-semantic-layer).
-_SEMANTIC_SOURCE_PATH = _REPO_ROOT / "src" / "data_engineering" / "dictionary" / "semantic_source.py"
+# Semantic consumption artifacts (regeneratable from the canonical Ossie model).
 _SEMANTIC_LAYER_JSON_PATH = _REPO_ROOT / ".artifacts" / "semantic_layer.json"
 _SEMANTIC_LAYER_MD_PATH = _REPO_ROOT / ".artifacts" / "semantic_layer.md"
+_OSSIE_MODEL_PATH = _REPO_ROOT / "semantic" / "sales.ossie.yaml"
 # Expected row counts from the EDA (see research.md Part A) — the validator
 # uses these to confirm the loaded warehouse matches the canonical dataset.
 
@@ -67,7 +71,7 @@ if TYPE_CHECKING:
     # the real imports happen lazily inside the functions that use them so
     # the module-level import graph (and the boundary contract tests) stay
     # unaffected.
-    from src.contracts.semantic_layer import SemanticViewer
+    from src.contracts.semantic_layer import SemanticLayerDocument, SemanticViewer
     from src.contracts.text_to_sql import TextToSqlResponse
 
 # Load .env from the repository root so FORGE_API_KEY, POSTGRES_*, METABASE_*,
@@ -163,6 +167,53 @@ def _err(msg: str) -> NoReturn:
 
 def _info(msg: str) -> None:
     print(msg)
+
+
+def _load_semantic_context() -> tuple["DataDictionaryDocument", TableDef, "SemanticLayerDocument", str]:
+    from src.data_engineering.semantic_layer.ossie import import_ossie, read_ossie_document
+
+    try:
+        text = read_ossie_document(_OSSIE_MODEL_PATH)
+    except (OSError, ValueError) as exc:
+        _err(f"Cannot load canonical Ossie model {_OSSIE_MODEL_PATH}: {exc}. No legacy fallback is enabled.")
+    if not _DEFAULT_SOURCE.exists():
+        _err(f"Source workbook not found: {_DEFAULT_SOURCE}")
+    _info(f"Exploring workbook for semantic context: {_DEFAULT_SOURCE}")
+    tables, shared = explore_workbook(_DEFAULT_SOURCE)
+    source_sha = sha256_of_file(_DEFAULT_SOURCE)
+    inference = SchemaInferenceResult(
+        source_file=str(_DEFAULT_SOURCE), source_sha256=source_sha, tables=tables,
+        shared_columns=shared, inferred_at=datetime.now(timezone.utc),
+    )
+    table_defs = infer_table_defs(tables)
+    orders_def = next((table for table in table_defs if table.name == "Orders"), None)
+    if orders_def is None:
+        _err("Orders table not found in inferred schema.")
+    document = generate_dictionary(inference, table_defs)
+    try:
+        semantic_doc = import_ossie(text, document)
+    except ValueError as exc:
+        _err(f"Canonical Ossie model {_OSSIE_MODEL_PATH} is incompatible: {exc}. No legacy fallback is enabled.")
+    if semantic_doc.provenance is None:
+        _err("Canonical Ossie model is missing semantic provenance.")
+    revision: str | None
+    dirty: bool | None
+    try:
+        revision = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=_REPO_ROOT, capture_output=True, text=True, check=True, timeout=10,
+        ).stdout.strip()
+        dirty = bool(subprocess.run(
+            ["git", "status", "--porcelain", "--", "src", "pyproject.toml", "uv.lock",
+             "app_web.py", "ask_metabase.py", "scripts", "docker"],
+            cwd=_REPO_ROOT, capture_output=True, text=True, check=True, timeout=10,
+        ).stdout.strip())
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+        _info(f"WARNING: code revision is unavailable: {exc}")
+        revision, dirty = None, None
+    provenance = semantic_doc.provenance.model_copy(update={"code_revision": revision, "code_dirty": dirty})
+    semantic_doc = semantic_doc.model_copy(update={"provenance": provenance})
+    _info(f"Loaded canonical Ossie model {_OSSIE_MODEL_PATH} (SHA-256 {provenance.model_sha256})")
+    return document, orders_def, semantic_doc, text
 
 
 # ---------------------------------------------------------------------------
@@ -364,6 +415,7 @@ def cmd_ask(
     allow_full_access: bool = False,
     metabase_enabled: bool = True,
     session_id: str | None = None,
+    json_output: bool = False,
 ) -> None:
     """ask: translate a natural-language question to SQL and return results.
 
@@ -377,8 +429,8 @@ def cmd_ask(
         is passed in a local/dev environment.
       - Wires the `GovernedQueryProvider` decorator around the PG adapter so
         RLS is enforced on every executed query.
-      - When the Semantic Layer artifact exists at `.artifacts/semantic_layer.json`,
-        loads it and passes it to the pipeline so the prompt includes metrics.
+      - Loads the mandatory canonical Ossie model before LLM or business SQL;
+        derived JSON/Markdown are never alternative sources.
 
     v2.1 (feature 004-metabase-integration):
       - When `metabase_enabled=True` and Metabase is reachable, wires a
@@ -390,12 +442,20 @@ def cmd_ask(
       - `--session <id>` routes the generated card into a 'Session: <id>'
         dashboard within the 'Chat Sessions' collection (US3).
     """
+    if json_output:
+        with redirect_stdout(sys.stderr):
+            response, viewer = _run_ask_pipeline(
+                question, viewer_id, allow_full_access,
+                metabase_enabled=metabase_enabled, session_id=session_id,
+            )
+        print(response.model_dump_json())
+        if (response.error or not response.validation.accepted or response.query_result is None
+                or response.query_result.error):
+            sys.exit(1)
+        return
     response, viewer = _run_ask_pipeline(
-        question,
-        viewer_id,
-        allow_full_access,
-        metabase_enabled=metabase_enabled,
-        session_id=session_id,
+        question, viewer_id, allow_full_access,
+        metabase_enabled=metabase_enabled, session_id=session_id,
     )
 
     # --- Print results ---
@@ -428,26 +488,31 @@ def _run_ask_pipeline(
     metabase_enabled: bool = False,
     session_id: str | None = None,
 ) -> tuple["TextToSqlResponse", "SemanticViewer"]:
-    """Shared setup for `ask` and `chart`: build + run the Text-to-SQL pipeline.
+    from src.contracts.text_to_sql import NLQuestion
 
-    Factored out of `cmd_ask` so `cmd_chart` (v3.1 NL->chart) can reuse the
-    exact same governed, semantically-enriched pipeline instead of duplicating
-    ~150 lines of viewer resolution + prompt-context building.
+    with _compose_ask_pipeline(viewer_id, allow_full_access, metabase_enabled, session_id) as (pipeline, viewer):
+        return pipeline.run(NLQuestion(text=question)), viewer
 
-    v2.1 Metabase publication (`on_query_complete` card creation) only runs
-    when `metabase_enabled=True` — `cmd_ask` passes its flag through, while
-    `chart` / `predict-sales-nl` keep the default (no cards for internal runs).
-    """
+
+@contextmanager
+def _compose_ask_pipeline(
+    viewer_id: str | None,
+    allow_full_access: bool,
+    metabase_enabled: bool = False,
+    session_id: str | None = None,
+) -> Iterator[tuple["TextToSqlPipeline", "SemanticViewer"]]:
+    """One composition for ask, chart and evaluation; one model load per operation."""
     from src.ai_engineering.llm_client import LlmClient
     from src.ai_engineering.pipeline import TextToSqlPipeline
     from src.contracts.semantic_layer import SemanticViewer
-    from src.contracts.text_to_sql import LlmConfig, NLQuestion, TextToSqlResponse
-    from src.data_engineering.semantic_layer.builder import SemanticLayerBuilder
+    from src.contracts.text_to_sql import LlmConfig, TextToSqlResponse
     from src.data_engineering.semantic_layer.governed_provider import (
         build_governed_provider,
     )
     from src.data_engineering.semantic_layer.registry import ViewerRegistry
     from src.data_engineering.semantic_layer.resolver import SemanticQueryResolver
+
+    document, orders_def, semantic_doc, _model_text = _load_semantic_context()
 
     # --- Fail-fast checks (FR-013) ---
     try:
@@ -544,62 +609,6 @@ def _run_ask_pipeline(
             "--allow-full-access."
         )
 
-    # --- Build the pipeline ---
-    src_path = _DEFAULT_SOURCE
-    if not src_path.exists():
-        _err(f"Source workbook not found: {src_path}")
-
-    _info("Exploring workbook for semantic context...")
-    tables, shared = explore_workbook(src_path)
-    source_sha = sha256_of_file(src_path)
-    inference = SchemaInferenceResult(
-        source_file=str(src_path),
-        source_sha256=source_sha,
-        tables=tables,
-        shared_columns=shared,
-        inferred_at=datetime.now(timezone.utc),
-    )
-    table_defs = infer_table_defs(tables)
-    orders_def = next(
-        (td for td in table_defs if td.name.lower() == "orders"), None
-    )
-    if orders_def is None:
-        _err("Orders table not found in inferred schema.")
-
-    document = generate_dictionary(inference, table_defs)
-
-    # --- Optional: load the Semantic Layer artifact for prompt enrichment (US3) ---
-    semantic_doc = None
-    if _SEMANTIC_LAYER_JSON_PATH.exists():
-        try:
-            import json
-
-            payload = json.loads(_SEMANTIC_LAYER_JSON_PATH.read_text())
-            from src.contracts.semantic_layer import SemanticLayerDocument
-
-            # `generated_at` is excluded from the canonical JSON; supply a
-            # placeholder so the model validates (it's not used at runtime).
-            payload.setdefault("generated_at", datetime.now(timezone.utc).isoformat())
-            semantic_doc = SemanticLayerDocument.model_validate(payload)
-            _info(f"Loaded Semantic Layer artifact from {_SEMANTIC_LAYER_JSON_PATH}")
-        except Exception as exc:
-            _info(
-                f"WARNING: could not load Semantic Layer artifact ({exc}); "
-                "continuing without semantic enrichment."
-            )
-            semantic_doc = None
-    else:
-        # Build on the fly if the artifact doesn't exist (best-effort).
-        try:
-            builder = SemanticLayerBuilder()
-            semantic_doc = builder.build(
-                dictionary=document,
-                semantic_source_sha256=sha256_of_file(_SEMANTIC_SOURCE_PATH),
-                source_sha256=source_sha,
-            )
-        except Exception as exc:
-            _info(f"WARNING: could not build Semantic Layer on the fly ({exc}).")
-
     llm_client = LlmClient(llm_config)
 
     # --- v2.1: optional MetabaseClient (best-effort integration) ---
@@ -648,6 +657,7 @@ def _run_ask_pipeline(
             resolver=SemanticQueryResolver(),
             viewer=viewer,
             table_def=orders_def,
+            provenance=semantic_doc.provenance,
         )
         pipeline = TextToSqlPipeline(
             dictionary=document,
@@ -659,9 +669,7 @@ def _run_ask_pipeline(
             viewer=viewer,
             on_query_complete=on_query_complete,
         )
-        response = pipeline.run(NLQuestion(text=question))
-
-    return response, viewer
+        yield pipeline, viewer
 
 
 def cmd_chart(
@@ -910,55 +918,35 @@ def cmd_predict_sales(environment: str, input_payload: dict[str, str]) -> None:
     print(f"latency_ms: {result.latency_ms}")
 
 
-def cmd_generate_semantic_layer() -> None:
-    """generate-semantic-layer: build and persist the Semantic Layer v2.0 artifact.
-
-    Produces two artifacts in `.artifacts/`:
-      - `semantic_layer.json`  (canonical, deterministic JSON — FR-007/SC-005)
-      - `semantic_layer.md`    (human-readable Markdown — FR-008)
-
-    The builder constructs the `SemanticLayerDocument` from the existing
-    `DataDictionaryDocument` (regenerated from the source workbook) and the
-    canonical metric definitions (`metrics.py`). No DB connection required.
-    Fail-fast (FR-013) if the source workbook is missing or the builder
-    detects an invalid reference (FR-006).
-
-    Prints a one-block summary: tables, metrics, dimensions, relationships.
-    """
-    from src.data_engineering.semantic_layer.builder import SemanticLayerBuilder
+def cmd_generate_semantic_layer(export_ossie_path: str | None = None) -> None:
+    """Generate JSON/Markdown derivatives from canonical Ossie, never a fallback."""
     from src.data_engineering.semantic_layer.render import (
         render_json,
         render_markdown,
     )
 
-    src_path = _DEFAULT_SOURCE
-    if not src_path.exists():
-        _err(f"Source workbook not found: {src_path}")
+    export_path = Path(export_ossie_path) if export_ossie_path is not None else None
+    if export_path is not None and export_path.exists():
+        _err(f"Refusing to overwrite Ossie candidate: {export_path}")
+    _document, _orders_def, semantic_doc, model_text = _load_semantic_context()
 
-    if not _SEMANTIC_SOURCE_PATH.exists():
-        _err(f"Semantic source not found: {_SEMANTIC_SOURCE_PATH}")
+    if export_path is not None:
+        from src.data_engineering.semantic_layer.ossie import (
+            canonicalize_ossie, conversion_report, serialize_ossie_yaml,
+        )
 
-    _info(f"Exploring workbook for semantic context: {src_path}")
-    tables, shared = explore_workbook(src_path)
-    source_sha = sha256_of_file(src_path)
-    inference = SchemaInferenceResult(
-        source_file=str(src_path),
-        source_sha256=source_sha,
-        tables=tables,
-        shared_columns=shared,
-        inferred_at=datetime.now(timezone.utc),
-    )
-    table_defs = infer_table_defs(tables)
-    document = generate_dictionary(inference, table_defs)
-
-    semantic_source_sha = sha256_of_file(_SEMANTIC_SOURCE_PATH)
-    _info("Building Semantic Layer document...")
-    builder = SemanticLayerBuilder()
-    semantic_doc = builder.build(
-        dictionary=document,
-        semantic_source_sha256=semantic_source_sha,
-        source_sha256=source_sha,
-    )
+        ossie_text = canonicalize_ossie(model_text)
+        report = conversion_report(ossie_text)
+        if export_path.suffix.lower() in {".yaml", ".yml"}:
+            ossie_text = serialize_ossie_yaml(ossie_text)
+        try:
+            with export_path.open("x", encoding="utf-8") as output:
+                output.write(ossie_text)
+        except OSError as exc:
+            _err(f"Cannot export Ossie candidate {export_path}: {exc}")
+        _info(f"Wrote Ossie candidate to {export_path}")
+        _info(f"Semantic SHA-256: {report.model_sha256}")
+        _info(f"Portability limitations: {len(report.issues)} (PostgreSQL platform profile)")
 
     _SEMANTIC_LAYER_JSON_PATH.parent.mkdir(parents=True, exist_ok=True)
     json_str = render_json(semantic_doc)
@@ -979,6 +967,9 @@ def cmd_generate_semantic_layer() -> None:
     print(f"  Relationships     : {len(semantic_doc.relationships)}")
     print(f"  Assumptions       : {len(semantic_doc.assumptions)}")
     print(f"  Source SHA-256    : {semantic_doc.source_sha256[:16]}...")
+    if semantic_doc.provenance is not None:
+        print(f"  Semantic SHA-256  : {semantic_doc.provenance.model_sha256}")
+        print(f"  Ossie revision    : {semantic_doc.provenance.ossie_revision}")
     print(f"  JSON deterministic: True (no generated_at field in JSON)")
 
 
@@ -1251,66 +1242,20 @@ def cmd_metabase_cards() -> None:
         print(f"  id={card.id:>4}  name={card.name!r}  display={card.display}  viewer={viewer_id}")
 
 
-def cmd_evaluate() -> None:
+def cmd_evaluate(viewer_id: str | None = None, allow_full_access: bool = False) -> None:
     """evaluate: run the sanity-check evaluation (v1.1).
 
     Runs ~10 sample questions through the full Text-to-SQL pipeline and prints
     a simple pass/fail summary (FR-017/SC-002). Requires Docker PG + FORGE_API_KEY.
     """
     from src.ai_engineering.evaluation import run_evaluation
-    from src.ai_engineering.llm_client import LlmClient
-    from src.ai_engineering.pipeline import TextToSqlPipeline
-    from src.contracts.text_to_sql import LlmConfig
-
-    # --- Fail-fast checks (FR-013) ---
-    try:
-        llm_config = LlmConfig.from_env()
-    except ValueError as exc:
-        _err(str(exc))
-
-    if not _docker_available():
-        _err("Docker is not running. Run `bootstrap` first to start the warehouse.")
-
-    config = PostgresConfig.from_env()
-
-    # --- Build the pipeline (same as cmd_ask) ---
-    src_path = _DEFAULT_SOURCE
-    if not src_path.exists():
-        _err(f"Source workbook not found: {src_path}")
-
-    _info("Exploring workbook for semantic context...")
-    tables, shared = explore_workbook(src_path)
-    source_sha = sha256_of_file(src_path)
-    inference = SchemaInferenceResult(
-        source_file=str(src_path),
-        source_sha256=source_sha,
-        tables=tables,
-        shared_columns=shared,
-        inferred_at=datetime.now(timezone.utc),
-    )
-    table_defs = infer_table_defs(tables)
-    orders_def = next(
-        (td for td in table_defs if td.name.lower() == "orders"), None
-    )
-    if orders_def is None:
-        _err("Orders table not found in inferred schema.")
-
-    document = generate_dictionary(inference, table_defs)
-    llm_client = LlmClient(llm_config)
 
     sample_path = _REPO_ROOT / "specs" / "002-text-to-sql-v1" / "sample_questions.json"
     if not sample_path.exists():
         _err(f"Sample questions file not found: {sample_path}")
 
     _info("Running sanity-check evaluation...")
-    with PostgresRepository(config=config) as repo:
-        pipeline = TextToSqlPipeline(
-            dictionary=document,
-            table_def=orders_def,
-            llm_client=llm_client,
-            query_provider=repo,
-            llm_config=llm_config,
-        )
+    with _compose_ask_pipeline(viewer_id, allow_full_access, metabase_enabled=False) as (pipeline, _viewer):
         summary = run_evaluation(pipeline, sample_path)
 
     print(summary)
@@ -1341,9 +1286,10 @@ def main(argv: list[str] | None = None) -> None:
         print("  teardown [--remove-volume]        Stop & remove container (and optionally volume)")
         print("  validate                          Single pass/fail health check")
         print("  generate-dictionary [--source P]  Generate data_dictionary.md from the schema")
-        print("  generate-semantic-layer            Generate .artifacts/semantic_layer.{json,md}")
+        print("  generate-semantic-layer [--export-ossie PATH]")
+        print("                                      Read canonical Ossie and generate JSON/Markdown derivatives; optionally export a copy")
         print("  metabase <setup|...>                v2.1 Metabase integration (`metabase setup` to bootstrap)")
-        print("  ask <question> [--viewer <id>] [--no-metabase] [--session <id>]")
+        print("  ask <question> [--viewer <id>] [--no-metabase] [--session <id>] [--json]")
         print("                                      Translate a natural-language question to SQL")
         print("                                      (--viewer <id> resolves a person from the")
         print("                                       People table, or a custom viewer from")
@@ -1352,7 +1298,8 @@ def main(argv: list[str] | None = None) -> None:
         print("  chart <question> [--viewer <id>]   Translate a NL request into a saved PNG chart")
         print("                                      (runs ask, then LLM picks chart type/axes,")
         print("                                       renders to .artifacts/charts/)")
-        print("  evaluate                           Run sanity-check evaluation (v1.1)")
+        print("  evaluate [--viewer ID | --allow-full-access]")
+        print("                                      Run evaluation with the same model and governance as ask")
         print("  train-sales-model                  Train, compare, and persist both sales models")
         print("  promote-sales-model --run-id ID --env {dev,staging,prod} [--force]")
         print("                                      Promote a persisted run to an environment")
@@ -1373,7 +1320,12 @@ def main(argv: list[str] | None = None) -> None:
         cmd_generate_dictionary(source_file=dict_source)
         return
     if command == "generate-semantic-layer":
-        cmd_generate_semantic_layer()
+        if not rest:
+            cmd_generate_semantic_layer()
+        elif len(rest) == 2 and rest[0] == "--export-ossie":
+            cmd_generate_semantic_layer(export_ossie_path=rest[1])
+        else:
+            _err("Usage: generate-semantic-layer [--export-ossie PATH]")
         return
     if command == "metabase":
         # Subcommands: setup | status | teardown | reset-cards.
@@ -1411,6 +1363,7 @@ def main(argv: list[str] | None = None) -> None:
         allow_full = False
         metabase_enabled = True
         session_id: str | None = None
+        json_output = False
         question_tokens: list[str] = []
         i = 0
         while i < len(rest):
@@ -1425,6 +1378,10 @@ def main(argv: list[str] | None = None) -> None:
                 continue
             if tok == "--no-metabase":
                 metabase_enabled = False
+                i += 1
+                continue
+            if tok == "--json":
+                json_output = True
                 i += 1
                 continue
             if tok == "--session" and i + 1 < len(rest):
@@ -1442,6 +1399,7 @@ def main(argv: list[str] | None = None) -> None:
             allow_full_access=allow_full,
             metabase_enabled=metabase_enabled,
             session_id=session_id,
+            json_output=json_output,
         )
         return
     if command == "chart":
@@ -1489,7 +1447,14 @@ def main(argv: list[str] | None = None) -> None:
         cmd_predict_sales_nl(" ".join(nl_question_tokens), nl_environment)
         return
     if command == "evaluate":
-        cmd_evaluate()
+        if len(rest) == 2 and rest[0] in {"--viewer", "-v"}:
+            cmd_evaluate(viewer_id=rest[1])
+        elif rest == ["--allow-full-access"]:
+            cmd_evaluate(allow_full_access=True)
+        elif not rest:
+            cmd_evaluate()
+        else:
+            _err("Usage: evaluate [--viewer ID | --allow-full-access]")
         return
     if command == "train-sales-model":
         cmd_train_sales_model()
