@@ -255,7 +255,7 @@ def explain_results(question_text: str, sql_text: str, columns_out, rows_out, vi
     from src.ai_engineering.llm_client import LlmClient
     from src.contracts.text_to_sql import LlmConfig
 
-    max_rows = 40
+    max_rows = 100
     sample = [
         {c: str(v) for c, v in zip(columns_out, r)}
         for r in rows_out[:max_rows]
@@ -272,6 +272,31 @@ def explain_results(question_text: str, sql_text: str, columns_out, rows_out, vi
         "qué se observa, tendencias o valores llamativos (picos, caídas, negativos) y una "
         "conclusión útil. Cita las cifras redondeadas de forma legible. No inventes datos "
         "que no estén en los resultados ni menciones el SQL. Responde solo con el texto."
+    )
+    client = LlmClient(LlmConfig.from_env())
+    return client.complete(prompt)
+
+
+def answer_followup(last: dict, chat: list, new_question: str) -> str:
+    """Responde una pregunta de seguimiento usando SOLO los resultados ya mostrados."""
+    from src.ai_engineering.llm_client import LlmClient
+    from src.contracts.text_to_sql import LlmConfig
+
+    max_rows = 100
+    sample = [{c: str(v) for c, v in zip(last["columns"], r)} for r in last["rows"][:max_rows]]
+    historial = "".join(f"\nUsuario: {t['q']}\nAnalista: {t['a']}" for t in chat)
+    prompt = (
+        "Eres un analista de datos de la Plataforma de Datos y GenAI (dataset "
+        "Global Superstore). Estás conversando sobre unos resultados ya consultados.\n"
+        f"Pregunta original del usuario '{last['viewer']}' (con RLS por regiones): \"{last['question']}\"\n"
+        f"SQL ejecutado: {last['sql']}\n"
+        f"Resultados ({len(last['rows'])} filas, muestra de {len(sample)}): {sample}\n"
+        f"Conversación previa:{historial or ' (ninguna)'}\n\n"
+        f"Nueva pregunta: \"{new_question}\"\n\n"
+        "Responde en castellano, en 2-5 frases, usando SOLO estos resultados. "
+        "Cita cifras concretas redondeadas de forma legible. Si la pregunta no se "
+        "puede responder con estos datos, dilo claramente y sugiere qué nueva "
+        "consulta haría falta. No inventes datos. Responde solo con el texto."
     )
     client = LlmClient(LlmConfig.from_env())
     return client.complete(prompt)
@@ -312,11 +337,6 @@ if run and question.strip():
         )
         st.stop()
 
-    st.markdown('<div class="fade-block">', unsafe_allow_html=True)
-    st.markdown('<div class="section-label">Consulta SQL validada</div>', unsafe_allow_html=True)
-    st.code(sql, language="sql")
-    st.markdown("</div>", unsafe_allow_html=True)
-
     tracker_slot.markdown(_tracker(2), unsafe_allow_html=True)
     conn_info = (
         f"host={os.environ.get('POSTGRES_HOST', 'localhost')} "
@@ -330,6 +350,62 @@ if run and question.strip():
         columns = [d.name for d in cur.description or []]
         rows = cur.fetchall()
 
+    lectura = ""
+    if explain and rows:
+        with st.spinner("El modelo está analizando los resultados..."):
+            try:
+                lectura = explain_results(question.strip(), sql, columns, rows, viewer.strip())
+            except Exception:
+                lectura = ""
+
+    publish_html = ""
+    if publish:
+        tracker_slot.markdown(_tracker(3), unsafe_allow_html=True)
+        card_id = create_metabase_question(
+            question.strip().capitalize(),
+            sql,
+            resolve_database_id(),
+            guess_display(sql),
+        )
+        url = f"{METABASE_URL}/question/{card_id}"
+        if dashboard.strip():
+            dash_id = add_to_dashboard(dashboard.strip(), card_id)
+            publish_html = (
+                f'<div class="fade-block" style="margin-top:0.8rem;">Gráfica publicada: '
+                f'<a href="{url}" style="color:{ACCENT};">abrir en Metabase</a> &middot; '
+                f'añadida al dashboard <a href="{METABASE_URL}/dashboard/{dash_id}" '
+                f'style="color:{ACCENT};">{dashboard}</a></div>'
+            )
+        else:
+            publish_html = (
+                f'<div class="fade-block" style="margin-top:0.8rem;">Gráfica publicada: '
+                f'<a href="{url}" style="color:{ACCENT};">abrir en Metabase</a></div>'
+            )
+
+    tracker_slot.markdown(_tracker(len(_STAGES) + 1), unsafe_allow_html=True)
+    # Persistir en sesion para que resultados y conversacion sobrevivan a los
+    # reruns de Streamlit (cada interaccion re-ejecuta el script entero).
+    st.session_state["last"] = {
+        "question": question.strip(),
+        "viewer": viewer.strip(),
+        "sql": sql,
+        "columns": columns,
+        "rows": rows,
+        "lectura": lectura,
+        "publish_html": publish_html,
+    }
+    st.session_state["chat"] = []
+
+# ---------- resultados (persisten entre interacciones) ----------
+
+last = st.session_state.get("last")
+if last:
+    st.markdown('<div class="fade-block">', unsafe_allow_html=True)
+    st.markdown('<div class="section-label">Consulta SQL validada</div>', unsafe_allow_html=True)
+    st.code(last["sql"], language="sql")
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    columns, rows = last["columns"], last["rows"]
     st.markdown('<div class="fade-block">', unsafe_allow_html=True)
     st.markdown(
         f'<div class="section-label">Resultados &middot; {len(rows)} filas</div>',
@@ -347,52 +423,41 @@ if run and question.strip():
         if not chart_df.empty and len(chart_df.columns) >= 1:
             st.markdown('<div class="section-label">Vista rápida</div>', unsafe_allow_html=True)
             colors = ACCENT if len(chart_df.columns) == 1 else None
-            if guess_display(sql) == "line":
+            if guess_display(last["sql"]) == "line":
                 st.line_chart(chart_df, color=colors)
             else:
                 st.bar_chart(chart_df, color=colors)
     st.markdown("</div>", unsafe_allow_html=True)
 
-    if explain and rows:
-        with st.spinner("El modelo está analizando los resultados..."):
-            try:
-                lectura = explain_results(question.strip(), sql, columns, rows, viewer.strip())
-            except Exception:
-                lectura = ""
-        if lectura:
-            st.markdown('<div class="fade-block">', unsafe_allow_html=True)
-            st.markdown('<div class="section-label">Lectura del modelo</div>', unsafe_allow_html=True)
-            st.markdown(lectura)
-            st.markdown("</div>", unsafe_allow_html=True)
-        else:
-            st.caption("No se pudo generar la explicación esta vez (la consulta y los datos no se ven afectados).")
+    if last["lectura"]:
+        st.markdown('<div class="fade-block">', unsafe_allow_html=True)
+        st.markdown('<div class="section-label">Lectura del modelo</div>', unsafe_allow_html=True)
+        st.markdown(last["lectura"])
+        st.markdown("</div>", unsafe_allow_html=True)
 
-    if publish:
-        tracker_slot.markdown(_tracker(3), unsafe_allow_html=True)
-        card_id = create_metabase_question(
-            question.strip().capitalize(),
-            sql,
-            resolve_database_id(),
-            guess_display(sql),
+    if last["publish_html"]:
+        st.markdown(last["publish_html"], unsafe_allow_html=True)
+
+    # ---------- conversa con los resultados ----------
+
+    st.markdown('<div class="section-label">Conversa con los resultados</div>', unsafe_allow_html=True)
+    for turno in st.session_state.get("chat", []):
+        st.markdown(f"**Tú:** {turno['q']}")
+        st.markdown(turno["a"])
+    with st.form("follow_form", clear_on_submit=True):
+        follow_q = st.text_input(
+            "Pregunta de seguimiento sobre estos datos",
+            placeholder="Ejemplo: ¿cuál fue el mejor mes y por qué destaca?",
         )
-        url = f"{METABASE_URL}/question/{card_id}"
-        if dashboard.strip():
-            dash_id = add_to_dashboard(dashboard.strip(), card_id)
-            st.markdown(
-                f'<div class="fade-block" style="margin-top:0.8rem;">Gráfica publicada: '
-                f'<a href="{url}" style="color:{ACCENT};">abrir en Metabase</a> &middot; '
-                f'añadida al dashboard <a href="{METABASE_URL}/dashboard/{dash_id}" '
-                f'style="color:{ACCENT};">{dashboard}</a></div>',
-                unsafe_allow_html=True,
-            )
-        else:
-            st.markdown(
-                f'<div class="fade-block" style="margin-top:0.8rem;">Gráfica publicada: '
-                f'<a href="{url}" style="color:{ACCENT};">abrir en Metabase</a></div>',
-                unsafe_allow_html=True,
-            )
-
-    tracker_slot.markdown(_tracker(len(_STAGES) + 1), unsafe_allow_html=True)
+        follow_send = st.form_submit_button("Preguntar")
+    if follow_send and follow_q.strip():
+        with st.spinner("El modelo está repasando los datos..."):
+            try:
+                respuesta = answer_followup(last, st.session_state.get("chat", []), follow_q.strip())
+            except Exception:
+                respuesta = "No se pudo responder esta vez — vuelve a intentarlo."
+        st.session_state.setdefault("chat", []).append({"q": follow_q.strip(), "a": respuesta})
+        st.rerun()
 
 # ---------- pie ----------
 
