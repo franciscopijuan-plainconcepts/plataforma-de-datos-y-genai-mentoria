@@ -236,3 +236,190 @@ rm -rf .artifacts/mlops/
 | `train-sales-model` | Extrae Orders, split cronológico, entrena `LinearRegression` + `CatBoostRegressor`, evalúa, persiste ambos runs. | (ninguno obligatorio; hiperparámetros por defecto documentados) |
 | `promote-sales-model` | Promueve un `run_id` existente a un ambiente. | `--run-id`, `--env {dev,staging,prod}`, `--force` (bypass del gate staging→prod, logueado) |
 | `predict-sales` | Predice `Sales` usando el modelo activo de un ambiente. | `--env {dev,staging,prod}`, + los 10 campos de `PredictionInput` (ver `data-model.md` § 7; reducido de 14 tras el Amendment) |
+
+## Amendment (2026-09-02): Batch forecast seeding (v3.1, no LLM)
+
+> **Decisión**: poblar un dashboard con "Sales predicho para los próximos
+> meses" es una tarea **batch**, no algo que el LLM deba disparar a petición
+> del cliente — el LLM nunca invoca el modelo directamente (Principle I).
+> Tanto `predict-sales-nl` (pregunta ad-hoc parseada por LLM) como el nuevo
+> seeder batch pasan por la MISMA función tipada `predict_sales()` de este
+> feature; para inputs de forecast deterministas no hay razón para pagar
+> latencia/costo/riesgo de fallo de LLM en tiempo de siembra.
+
+Añade `src/mlops/seed_predictions.py` (nuevo módulo, sin modificar ningún
+contrato de esta spec) + el comando CLI `seed-sales-predictions`:
+
+```bash
+uv run python -m src.cli.main seed-sales-predictions --env prod --months-ahead 6 [--force]
+```
+
+**Comportamiento**:
+1. Si no hay modelo promovido en `--env`, entrena + promueve uno
+   automáticamente (mejor RMSE entre `linear_regression`/`catboost`,
+   siguiendo el mismo gate `dev`→`staging`→`prod` de `promote-sales-model`).
+2. Extrae las 10 combinaciones `(Region, Category)` más frecuentes de
+   `Orders` (vía `extract_feature_set`, el mismo extractor de
+   `train-sales-model`) y construye un perfil "orden típica" por
+   combinación (moda de `ship_mode`/`segment`/`market`/`sub_category`/
+   `product_id`, mediana de `quantity`).
+3. Para cada perfil × cada uno de los próximos `--months-ahead` meses,
+   construye un `PredictionInput` y llama a `predict_sales()` — la misma
+   función usada por `predict-sales`/`predict-sales-nl` — persistiendo cada
+   resultado en la tabla `Predictions` (data-model.md § 9), sin lógica de
+   predicción paralela.
+4. **Idempotente**: si el `run_id` activo ya tiene filas futuras en
+   `Predictions`, la siembra se salta (`--force` para reseeded).
+
+**Integración con `bootstrap`** (`001`/`quickstart.md`): al final de
+`bootstrap`, tras crear la tabla `Predictions`, se invoca este flujo
+automáticamente y en modo best-effort (nunca hace fallar `bootstrap`, ver
+`SEED_SALES_PREDICTIONS=false` en `.env.example` para desactivarlo). Esto
+significa que, tras un solo `uv run python -m src.cli.main bootstrap` en un
+clon limpio, `Predictions` ya contiene forecasts listos para Metabase, sin
+pasos manuales de `train-sales-model`/`promote-sales-model`/`predict-sales`.
+
+**Validación** (verificado end-to-end el 2026-09-02):
+```bash
+rm -rf .artifacts/mlops/
+uv run python -m src.cli.main bootstrap
+# -> "Seeded 60 future predictions into 'Predictions' (env=prod)."
+uv run python -m src.cli.main bootstrap
+# -> "Future predictions already present for the active model — skipped."
+uv run python -m src.cli.main seed-sales-predictions --env prod --force --months-ahead 3
+# -> "Seeded 30 future predictions into 'Predictions' (env=prod, months_ahead=3)."
+```
+
+Esto NO cambia el alcance "Explicitly out of scope" original (§ arriba en
+`spec.md`: sigue sin haber serving HTTP/API en tiempo real) — sigue siendo
+100% batch/CLI, ahora simplemente invocado automáticamente por `bootstrap`
+en lugar de requerir un paso manual.
+
+## Amendment (2026-09-02): Text-to-SQL sobre `Predictions` (v3.2, sin nuevo LLM call)
+
+> **Decisión**: el pipeline gobernado `ask`/`chart` (y por extensión
+> `app_web.py`, que invoca `ask` vía subprocess) ahora puede generar SQL
+> contra la tabla `Predictions` (forecasts ya sembrados por el amendment
+> anterior), además de `Orders`. Esto es SOLO LECTURA sobre forecasts ya
+> calculados — el LLM sigue sin invocar el modelo directamente (misma
+> garantía de Principle I que `predict-sales-nl`, ahora extendida a
+> analítica ad-hoc sobre el histórico de forecasts).
+
+Cambios (todos en el pipeline core, `app_web.py`/`ask_metabase.py` NO se
+tocan — son clientes finos que ya se benefician automáticamente):
+
+1. `SqlValidator.validate_sql(sql, table_def, extra_tables=None)` — nuevo
+   parámetro opcional `extra_tables: dict[str, TableDef]`. A diferencia del
+   caso especial pre-existente de `"returns"` (que nunca necesitó columnas
+   propias whitelisted, porque sus metric-patterns solo referencian `Order
+   ID`, compartida con `Orders`), `Predictions` expone columnas que NO
+   existen en `Orders` (`Predicted Sales`, `Predicted At`, `Run ID`, `Model
+   Name`, `Environment`, `Used Fallback Encoding`, `Latency Ms`) — por eso
+   `extra_tables` también fusiona esas columnas en `allowed_columns`, no
+   solo el nombre de tabla en `allowed_tables`.
+2. `build_prompt(..., extra_tables=None)` (`src/ai_engineering/prompt_builder.py`)
+   — renderiza un bloque de schema independiente por cada tabla extra
+   (columnas + tipos, tomados directo del `TableDef`, ya que `Predictions`
+   es Postgres-only y no viene del diccionario generado desde el Excel) y
+   añade una regla explícita: el LLM PUEDE consultar `Predictions` en su
+   propio `FROM` (sin JOIN con `Orders`) para preguntas sobre forecast/sales
+   futuro.
+3. `TextToSqlPipeline(..., extra_tables=None)` (`src/ai_engineering/pipeline.py`)
+   — hilvana `extra_tables` hacia `build_prompt` y `validate_sql`.
+4. `_run_ask_pipeline()` (`src/cli/main.py`, usado por `ask`/`chart`) —
+   construye `predictions_table_def()` (`src/mlops/predictions_store.py`) e
+   inyecta `extra_tables={"predictions": predictions_table_def()}` al
+   construir el pipeline.
+5. RLS sigue aplicando sin cambios en `SemanticQueryResolver`: `Predictions`
+   tiene su propia columna `Region`, y el resolver inyecta el predicado
+   `WHERE "Region" IN (...)` directamente en el texto SQL (regex, agnóstico
+   de tabla) — un viewer sigue viendo solo los forecasts de su(s) región(es).
+
+**Bugs pre-existentes corregidos** (descubiertos al validar esta feature,
+bloqueaban probar preguntas reales sobre `Predictions` con filtros de
+texto):
+- `SqlValidator._extract_identifiers` no despojaba literales de string entre
+  comillas simples (p. ej. `WHERE "Region" = 'Caribbean'`) antes de extraer
+  identificadores, por lo que `caribbean` se rechazaba como columna
+  inexistente. Ahora también se despojan literales `'...'` (con `''`
+  escapado) antes de tokenizar.
+- `LlmClient.generate_sql` no despojaba un posible fence ```` ```sql ... ``` ````
+  si el LLM ignoraba la regla "no markdown" (más probable en preguntas de
+  agregación/agrupación más largas). Ahora se limpia un fence que envuelva
+  la respuesta completa antes de devolver `GeneratedSql`.
+
+**Validación** (verificado end-to-end el 2026-09-02, con `Predictions` ya
+sembrada por el amendment anterior):
+```bash
+uv run python -m src.cli.main ask \
+  "What is the average predicted sales for the South America region?" \
+  --viewer <persona_de_esa_region>
+# -> Generated SQL: SELECT AVG("Predicted Sales") FROM "Predictions" WHERE "Region" = 'South America';
+# -> Validation: ACCEPTED
+
+uv run python -m src.cli.main ask \
+  "Show predicted sales by region for the next few months, ordered from highest to lowest"
+# -> Generated SQL: SELECT "Region", SUM("Predicted Sales") AS predicted_sales
+#    FROM "Predictions" WHERE "Order Date" >= CURRENT_DATE
+#    AND "Order Date" < CURRENT_DATE + INTERVAL '3 months'
+#    GROUP BY "Region" ORDER BY predicted_sales DESC;
+# -> Validation: ACCEPTED, 10 rows returned
+
+# Orders sigue funcionando sin cambios (regresión verificada):
+uv run python -m src.cli.main ask "What is the total sales amount?"
+# -> Generated SQL: SELECT SUM("Sales") FROM "Orders"; -> ACCEPTED
+```
+
+Suite de tests (`tests/unit/test_sql_validator.py`,
+`tests/contract/test_text_to_sql.py`, `tests/contract/test_semantic_layer.py`,
+`tests/contract/test_boundaries.py`, y el resto de `tests/unit`+`tests/contract`)
+pasa sin regresiones tras este amendment.
+
+## Amendment (2026-09-02): Comparar Orders vs Predictions (CTE + subqueries) en el validador
+
+> Descubierto probando el amendment anterior a través de `app_web.py`: la
+> pregunta más natural para este feature — "compara ventas reales vs
+> predichas por región" — fallaba intermitentemente. El LLM resuelve esta
+> comparación de dos formas equivalentes según el prompt/temperatura: (a) un
+> `WITH actual AS (...), predicted AS (...) SELECT ...` (CTE), o (b)
+> `FROM (SELECT ...) o JOIN (SELECT ...) p ON ...` (subqueries derivadas con
+> alias). Ninguna de las dos pasaba el validador:
+
+1. **CTEs rechazadas de raíz**: `"with"` estaba en `_FORBIDDEN_KEYWORDS`
+   (bloqueo total, sin distinguir un `WITH` de solo lectura de uno
+   malicioso) y `validate_sql` exigía que el SQL empezara literalmente por
+   `SELECT`. Ahora: se permite empezar por `WITH` (se sigue rechazando
+   `WITH RECURSIVE` explícitamente — riesgo de agotamiento de recursos sin
+   caso de uso legítimo aquí), y los nombres de CTE (`WITH <nombre> AS (`)
+   se extraen y se tratan como tablas virtuales permitidas SOLO dentro de
+   esa sentencia (no se añaden a `allowed_tables` globalmente). Cualquier
+   keyword de escritura (`INSERT`/`UPDATE`/`DELETE`/...) sigue bloqueado
+   sin importar si está envuelto en un CTE.
+2. **Alias de subquery derivada no reconocidos**: `FROM (SELECT ...) o` —
+   el extractor de alias de tabla solo reconocía `FROM <tabla> <alias>`,
+   no `FROM (<subquery>) <alias>`, así que `o`/`p` se marcaban como
+   "columna inexistente" al usarse como `o."Region"`. Ahora se extrae
+   también el identificador inmediatamente después de un `)` de cierre
+   (con o sin `AS`) como alias de tabla válido.
+3. El prompt (`prompt_builder.py`) ya NO le dice al LLM "no unas Predictions
+   con Orders" a secas — ahora le indica explícitamente el patrón correcto:
+   agregar cada tabla por separado (su propio `GROUP BY`) en su propio CTE
+   o subquery, y unir los agregados por la dimensión compartida (p. ej.
+   Region), nunca un JOIN fila-a-fila (`Predictions` no tiene una fila por
+   pedido histórico, son perfiles representativos).
+
+**Validación** (verificado con 3 intentos consecutivos, ambos estilos de
+SQL generados por el LLM, el 2026-09-02):
+```bash
+uv run python -m src.cli.main ask \
+  "Compara las ventas reales con las predichas por región" \
+  --allow-full-access
+# -> Validation: ACCEPTED (CTE-style o subquery-style, ambos aceptados)
+# -> Rows: una fila por Region con actual_sales y/o predicted_sales
+```
+
+Suite de tests completa (`tests/unit` + `tests/contract`) sigue en verde
+(210 passed) tras este amendment; también se corrió la suite `tests/`
+completa incluyendo integración (220 passed, 2 skipped) sin regresiones.
+
+

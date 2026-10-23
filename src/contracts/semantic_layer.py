@@ -208,6 +208,7 @@ class SemanticQueryResolverProtocol(Protocol):
         sql: str,
         viewer: SemanticViewer,
         table_def: TableDef,
+        extra_tables: dict[str, TableDef] | None = None,
     ) -> str:
         """Return the SQL wrapped with a `Region IN (viewer.regions)` filter.
 
@@ -217,6 +218,8 @@ class SemanticQueryResolverProtocol(Protocol):
           producing 0 rows (outer `WHERE FALSE`).
         - Otherwise restricts analytic scans before aggregation; the supported
           order-linked Returns existence check preserves its legacy semantics.
+        - `extra_tables` (e.g. Predictions) are admitted and Region-filtered
+          like `table_def`.
         """
         ...
 

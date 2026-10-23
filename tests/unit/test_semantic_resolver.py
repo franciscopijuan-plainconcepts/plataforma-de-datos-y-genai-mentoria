@@ -270,3 +270,22 @@ def test_correlated_scalar_return_count_rejected() -> None:
            'FROM "Orders" o')
     with pytest.raises(ValueError, match="Returns subquery"):
         SemanticQueryResolver().apply_rls(sql, _viewer(["North"]), _orders_table_def())
+
+
+def test_extra_table_is_region_filtered_under_its_own_name() -> None:
+    """Predictions (004-sales-prediction-model) must not be rewritten to Returns."""
+    predictions = TableDef(
+        name="Predictions",
+        columns=[
+            ColumnDef(name="Predicted Sales", logical_type=LogicalType.DECIMAL, precision=18, scale=2, nullable=False),
+            ColumnDef(name="Region", logical_type=LogicalType.STRING, nullable=False),
+        ],
+        description="Forecasts.",
+    )
+    sql = 'SELECT SUM("Predicted Sales") FROM Predictions'
+    result = SemanticQueryResolver().apply_rls(
+        sql, _viewer(["Caribbean"]), _orders_table_def(),
+        extra_tables={"predictions": predictions},
+    )
+    assert 'FROM (SELECT * FROM "Predictions" WHERE "Region" IN (\'Caribbean\'))' in result
+    assert '"Returns"' not in result

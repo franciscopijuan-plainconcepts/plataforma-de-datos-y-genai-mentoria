@@ -28,18 +28,27 @@ _FUNCTIONS = {
 _RETURNS_COLUMNS = {"Return ID", "Order ID", "Returned", "Region"}
 
 
-def _source_columns(source: exp.Expression | Scope, table_def: TableDef) -> set[str]:
+Schemas = dict[str, set[str]]
+
+
+def _schemas(table_def: TableDef, extra_tables: dict[str, TableDef] | None) -> Schemas:
+    """Lower-cased table name -> column names for every queryable table."""
+    schemas: Schemas = {"returns": set(_RETURNS_COLUMNS)}
+    for definition in [*(extra_tables or {}).values(), table_def]:
+        schemas[definition.name.lower()] = {column.name for column in definition.columns}
+    return schemas
+
+
+def _source_columns(source: exp.Expression | Scope, schemas: Schemas) -> set[str]:
     if isinstance(source, exp.Table):
-        if source.name.lower() == table_def.name.lower():
-            return {column.name for column in table_def.columns}
-        return _RETURNS_COLUMNS
+        return schemas.get(source.name.lower(), set())
     if isinstance(source, Scope):
         # Only our filtered single-table SELECT * sources may be admitted.
-        return set().union(*(_source_columns(child, table_def) for child in source.sources.values()))
+        return set().union(*(_source_columns(child, schemas) for child in source.sources.values()))
     return set()
 
 
-def _column_error(scope: Scope, column: exp.Column, table_def: TableDef) -> str | None:
+def _column_error(scope: Scope, column: exp.Column, schemas: Schemas) -> str | None:
     cursor: Scope | None = scope
     while cursor is not None:
         sources = cursor.sources
@@ -49,13 +58,13 @@ def _column_error(scope: Scope, column: exp.Column, table_def: TableDef) -> str 
             if matches:
                 if isinstance(column.this, exp.Star):
                     return None
-                available = _source_columns(matches[0], table_def)
+                available = _source_columns(matches[0], schemas)
                 if column.name.lower() in {name.lower() for name in available}:
                     return None
                 return f"SQL references non-existent column: {column.sql()}"
         else:
             matches = [source for source in sources.values()
-                       if column.name.lower() in {name.lower() for name in _source_columns(source, table_def)}]
+                       if column.name.lower() in {name.lower() for name in _source_columns(source, schemas)}]
             if len(matches) == 1:
                 return None
             if len(matches) > 1:
@@ -72,7 +81,7 @@ def _column_error(scope: Scope, column: exp.Column, table_def: TableDef) -> str 
     return f"SQL references non-existent column or qualifier: {column.sql()}"
 
 
-def _error(sql: str, table_def: TableDef, allow_governed_sources: bool) -> str | None:
+def _error(sql: str, allow_governed_sources: bool, schemas: Schemas) -> str | None:
     if not sql.strip():
         return "SQL is empty"
     if len(sql.encode("utf-8")) > 200_000:
@@ -105,7 +114,7 @@ def _error(sql: str, table_def: TableDef, allow_governed_sources: bool) -> str |
     for table in tree.find_all(exp.Table):
         if table.name.lower() == "people":
             return "SQL references out-of-scope table: People (governance mapping)"
-        if (table.name.lower() not in {table_def.name.lower(), "returns"}
+        if (table.name.lower() not in schemas
                 or table.db or table.catalog or not isinstance(table.this, exp.Identifier)
                 or any(value for key, value in table.args.items() if key not in {"this", "alias"})
                 or (table.args.get("alias") is not None and table.args["alias"].args.get("columns"))):
@@ -141,7 +150,7 @@ def _error(sql: str, table_def: TableDef, allow_governed_sources: bool) -> str |
         for column in [*scope.columns, *scope.stars]:
             if not isinstance(column, exp.Column):
                 return "Unsupported qualified star expression"
-            reason = _column_error(scope, column, table_def)
+            reason = _column_error(scope, column, schemas)
             if reason is not None:
                 return reason
     return None
@@ -149,8 +158,15 @@ def _error(sql: str, table_def: TableDef, allow_governed_sources: bool) -> str |
 
 def validate_sql(
     sql: str, table_def: TableDef, *, allow_governed_sources: bool = False,
+    extra_tables: dict[str, TableDef] | None = None,
 ) -> ValidationResult:
-    reason = _error(sql, table_def, allow_governed_sources)
+    """Validate one read-only SELECT against `table_def`, Returns and `extra_tables`.
+
+    `extra_tables` (004-sales-prediction-model) admits additional tables, with
+    their own columns, that generated SQL may query, e.g. Predictions.
+    """
+    schemas = _schemas(table_def, extra_tables)
+    reason = _error(sql, allow_governed_sources, schemas)
     return ValidationResult(accepted=reason is None, reason=reason, sql=sql)
 
 

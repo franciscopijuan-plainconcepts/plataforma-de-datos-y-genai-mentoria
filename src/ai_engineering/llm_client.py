@@ -10,10 +10,29 @@ Reference: specs/002-text-to-sql-v1/research.md Part D
 
 from __future__ import annotations
 
+import re
+
 import httpx
 from openai import OpenAI
 
 from src.contracts.text_to_sql import GeneratedSql, LlmConfig
+
+
+def _strip_markdown_fence(text: str) -> str:
+    """Strip a surrounding ```sql ... ``` / ``` ... ``` code fence, if present.
+
+    Despite the prompt's explicit "no markdown" rule, LLMs occasionally wrap
+    the SQL in a fenced code block anyway (more likely on longer/aggregation
+    queries). `SqlValidator` requires the raw SQL to start with `SELECT`, so
+    an un-stripped fence causes a false REJECTED. This is a defensive,
+    best-effort cleanup — it only strips a fence that wraps the ENTIRE
+    response, never touches partial/inline backticks.
+    """
+    stripped = text.strip()
+    match = re.match(r"^```(?:sql)?\s*\n?(.*?)\n?```$", stripped, re.DOTALL | re.IGNORECASE)
+    if match:
+        return match.group(1).strip()
+    return stripped
 
 
 class LlmClient:
@@ -46,7 +65,7 @@ class LlmClient:
         )
         content = response.choices[0].message.content or ""
         return GeneratedSql(
-            sql=content.strip(),
+            sql=_strip_markdown_fence(content),
             model_name=self._config.model_name,
             raw_response=response.model_dump(),
         )

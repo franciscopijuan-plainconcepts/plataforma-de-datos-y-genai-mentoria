@@ -84,8 +84,11 @@ class SemanticQueryResolver:
     def __init__(self, gov_bypass_logger: GovBypassLogger | None = None) -> None:
         self._gov_bypass_logger = gov_bypass_logger or _default_gov_bypass_logger
 
-    def apply_rls(self, sql: str, viewer: SemanticViewer, table_def: TableDef) -> str:
-        validation = validate_sql(sql, table_def)
+    def apply_rls(
+        self, sql: str, viewer: SemanticViewer, table_def: TableDef,
+        extra_tables: dict[str, TableDef] | None = None,
+    ) -> str:
+        validation = validate_sql(sql, table_def, extra_tables=extra_tables)
         if not validation.accepted:
             raise ValueError(f"Governance rejected SQL: {validation.reason}")
         if viewer.allows_full_access and viewer.is_local_dev:
@@ -99,6 +102,10 @@ class SemanticQueryResolver:
         if not isinstance(tree, exp.Select):
             raise ValueError("Governance requires a SELECT")
         linked_returns = _order_linked_returns(tree)
+        # Every extra table (e.g. Predictions) carries a Region column and is
+        # filtered exactly like the primary table; anything else is Returns.
+        physical_names = {definition.name.lower(): definition.name
+                          for definition in [*(extra_tables or {}).values(), table_def]}
         # Snapshot the original scans: never visit the replacements recursively.
         for table in list(tree.find_all(exp.Table)):
             if id(table) in linked_returns:
@@ -109,7 +116,7 @@ class SemanticQueryResolver:
             alias = table.args.get("alias")
             if alias is None:
                 alias = exp.TableAlias(this=table.this.copy())
-            physical_name = table_def.name if table.name.lower() == table_def.name.lower() else "Returns"
+            physical_name = physical_names.get(table.name.lower(), "Returns")
             physical = exp.Table(this=exp.to_identifier(physical_name, quoted=True))
             predicate = (
                 exp.false() if no_access else exp.In(
@@ -123,7 +130,8 @@ class SemanticQueryResolver:
             # Preserve the public no-region behavior: no aggregate row either.
             tree = exp.select("*").from_(tree.subquery("_gov")).where(exp.false())
         governed = tree.sql(dialect="postgres")
-        validation = validate_sql(governed, table_def, allow_governed_sources=True)
+        validation = validate_sql(governed, table_def, allow_governed_sources=True,
+                                  extra_tables=extra_tables)
         if not validation.accepted:
             raise ValueError(f"Governed SQL failed validation: {validation.reason}")
         return governed

@@ -47,6 +47,7 @@ class GovernedQueryProvider:
         table_def: TableDef,
         model_sha256: str | None = None,
         provenance: SemanticModelProvenance | None = None,
+        extra_tables: dict[str, TableDef] | None = None,
     ) -> None:
         self._delegate = delegate
         self._resolver = resolver
@@ -56,11 +57,15 @@ class GovernedQueryProvider:
             raise ValueError("Conflicting semantic model hashes")
         self._model_sha256 = provenance.model_sha256 if provenance is not None else model_sha256
         self._provenance = provenance
+        self._extra_tables = {name: definition.model_copy(deep=True)
+                              for name, definition in (extra_tables or {}).items()}
 
     def prepare_query(self, sql: str, table_def: TableDef) -> PreparedQuery:
         if table_def != self._table_def:
             raise ValueError("Query schema differs from the governed provider schema")
-        governed_sql = self._resolver.apply_rls(sql, self._viewer, table_def)
+        governed_sql = self._resolver.apply_rls(
+            sql, self._viewer, table_def, extra_tables=self._extra_tables
+        )
         return PreparedQuery(generated_sql=sql, sql=governed_sql,
                              viewer=self._viewer.model_copy(deep=True),
                              model_sha256=self._model_sha256, provenance=self._provenance)
@@ -111,6 +116,7 @@ def build_governed_provider(
     table_def: TableDef,
     model_sha256: str | None = None,
     provenance: SemanticModelProvenance | None = None,
+    extra_tables: dict[str, TableDef] | None = None,
 ) -> GovernedExecutionProvider:
     """CLI composition-root helper: require a viewer for governed execution.
 
@@ -131,6 +137,7 @@ def build_governed_provider(
         table_def=table_def,
         model_sha256=model_sha256,
         provenance=provenance,
+        extra_tables=extra_tables,
     )
 
 
