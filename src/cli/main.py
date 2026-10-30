@@ -558,36 +558,12 @@ def _run_ask_pipeline(
         return pipeline.run(NLQuestion(text=question)), viewer
 
 
-@contextmanager
-def _compose_ask_pipeline(
-    viewer_id: str | None,
-    allow_full_access: bool,
-    metabase_enabled: bool = False,
-    session_id: str | None = None,
-) -> Iterator[tuple["TextToSqlPipeline", "SemanticViewer"]]:
-    """One composition for ask, chart and evaluation; one model load per operation."""
-    from src.ai_engineering.llm_client import LlmClient
-    from src.ai_engineering.pipeline import TextToSqlPipeline
+def _resolve_viewer(
+    viewer_id: str | None, allow_full_access: bool, config: PostgresConfig,
+) -> "SemanticViewer":
+    """Governance context shared by ask/chart/evaluate and scripted dashboards."""
     from src.contracts.semantic_layer import SemanticViewer
-    from src.contracts.text_to_sql import LlmConfig, TextToSqlResponse
-    from src.data_engineering.semantic_layer.governed_provider import (
-        build_governed_provider,
-    )
     from src.data_engineering.semantic_layer.registry import ViewerRegistry
-    from src.data_engineering.semantic_layer.resolver import SemanticQueryResolver
-
-    document, orders_def, semantic_doc, _model_text = _load_semantic_context()
-
-    # --- Fail-fast checks (FR-013) ---
-    try:
-        llm_config = LlmConfig.from_env()
-    except ValueError as exc:
-        _err(str(exc))
-
-    if not _docker_available():
-        _err("Docker is not running. Run `bootstrap` first to start the warehouse.")
-
-    config = PostgresConfig.from_env()
 
     # --- Resolve the viewer (governance context) ---
     # v2.0 "login as a person" model: try the People table first (the canonical
@@ -672,6 +648,42 @@ def _compose_ask_pipeline(
             "Provide --viewer <id> (see viewers.example.yaml) or, in local/dev, "
             "--allow-full-access."
         )
+    if viewer is None:  # pragma: no cover - every branch above resolves or exits
+        _err(f"Could not resolve viewer {viewer_id!r}.")
+    return viewer
+
+
+@contextmanager
+def _compose_ask_pipeline(
+    viewer_id: str | None,
+    allow_full_access: bool,
+    metabase_enabled: bool = False,
+    session_id: str | None = None,
+) -> Iterator[tuple["TextToSqlPipeline", "SemanticViewer"]]:
+    """One composition for ask, chart and evaluation; one model load per operation."""
+    from src.ai_engineering.llm_client import LlmClient
+    from src.ai_engineering.pipeline import TextToSqlPipeline
+    from src.contracts.semantic_layer import SemanticViewer
+    from src.contracts.text_to_sql import LlmConfig, TextToSqlResponse
+    from src.data_engineering.semantic_layer.governed_provider import (
+        build_governed_provider,
+    )
+    from src.data_engineering.semantic_layer.resolver import SemanticQueryResolver
+
+    document, orders_def, semantic_doc, _model_text = _load_semantic_context()
+
+    # --- Fail-fast checks (FR-013) ---
+    try:
+        llm_config = LlmConfig.from_env()
+    except ValueError as exc:
+        _err(str(exc))
+
+    if not _docker_available():
+        _err("Docker is not running. Run `bootstrap` first to start the warehouse.")
+
+    config = PostgresConfig.from_env()
+
+    viewer = _resolve_viewer(viewer_id, allow_full_access, config)
 
     # v3.2 (004-sales-prediction-model amendment): expose the `Predictions`
     # table (Postgres-only — not sourced from the Excel workbook, so it's
@@ -1388,6 +1400,101 @@ def cmd_metabase_cards() -> None:
         print(f"  id={card.id:>4}  name={card.name!r}  display={card.display}  viewer={viewer_id}")
 
 
+def cmd_metabase_forecast_dashboard(viewer_id: str, environment: str, replace: bool = False) -> None:
+    """metabase forecast-dashboard: scripted predictive dashboard for one viewer (v3.3).
+
+    Cards are built from the Ossie forecast metrics, every SQL goes through the
+    governed provider (RLS snapshot of the viewer's regions) and is executed
+    once before anything is published, like an `ask` card.
+    """
+    from datetime import datetime, timezone
+
+    from src.ai_engineering.metabase_client import MetabaseClient
+    from src.contracts.metabase import DashcardPlacement, MetabaseConfig
+    from src.data_engineering.semantic_layer.governed_provider import build_governed_provider
+    from src.data_engineering.semantic_layer.resolver import SemanticQueryResolver
+    from src.mlops.predictions_store import forecast_accuracy_view_def, predictions_table_def
+    from src.mlops.registry import ArtifactRegistry
+    from src.reporting.forecast_dashboard import build_forecast_cards
+
+    _document, orders_def, semantic_doc, _model_text = _load_semantic_context()
+    if not _docker_available():
+        _err("Docker is not running. Run `bootstrap` first to start the warehouse.")
+    state = _load_metabase_state()
+    if state is None:
+        _err("Metabase state not found; run `metabase setup` first.")
+    active = ArtifactRegistry().resolve_active_run(cast("Any", environment))
+    if active is None:
+        _err(f"No active sales model in {environment!r}; run `bootstrap` or `seed-sales-predictions` first.")
+    try:
+        specs = build_forecast_cards(semantic_doc, run_id=active.run_id, environment=environment)
+    except ValueError as exc:
+        _err(str(exc))
+
+    config = PostgresConfig.from_env()
+    viewer = _resolve_viewer(viewer_id, False, config)
+    extra_tables = {
+        "predictions": predictions_table_def(),
+        "forecast accuracy": forecast_accuracy_view_def(),
+    }
+    with PostgresRepository(config=config) as repo:
+        provider = build_governed_provider(
+            delegate=repo, resolver=SemanticQueryResolver(), viewer=viewer, table_def=orders_def,
+            provenance=semantic_doc.provenance, extra_tables=extra_tables,
+        )
+        prepared = []
+        for spec in specs:
+            try:
+                query = provider.prepare_query(spec.sql, orders_def)
+                provider.execute_prepared_query(query, orders_def)
+            except Exception as exc:
+                _err(f"Card {spec.key!r} failed governed execution, nothing published: {exc}")
+            prepared.append(query)
+
+    try:
+        mb_config = MetabaseConfig.from_env()
+    except ValueError as exc:
+        _err(str(exc))
+    client = MetabaseClient(mb_config)
+    dashboard = client.get_or_create_dashboard(f"Forecast: {viewer.viewer_id}", state.collection_id)
+    if dashboard is None:
+        _err("Could not find or create the forecast dashboard in Metabase.")
+    existing = client.get_dashboard_card_ids(dashboard.id)
+    if existing is None:
+        _err(f"Could not read dashboard {dashboard.id} from Metabase.")
+    if existing and not replace:
+        print(f"Dashboard {dashboard.name!r} (id={dashboard.id}) already has {len(existing)} cards — "
+              "skipped (use --replace to rebuild it).")
+        return
+
+    created_at = datetime.now(timezone.utc).isoformat()
+    placements: list[DashcardPlacement] = []
+    for spec, query in zip(specs, prepared):
+        description = (
+            f"viewer_id={viewer.viewer_id} gov_bypass=False regions={list(viewer.regions)!r} "
+            f"model_sha256={query.model_sha256} run_id={active.run_id} env={environment} "
+            f"source=forecast-dashboard created_at={created_at}"
+        )
+        card = client.create_card(
+            name=spec.name, sql=query.sql, collection_id=state.collection_id, display=spec.display,
+            description=description, db_id=state.metabase_db_id,
+            visualization_settings=spec.visualization_settings,
+        )
+        if card is None:
+            _err(f"Metabase rejected card {spec.key!r}; dashboard left unchanged.")
+        placements.append(DashcardPlacement(
+            card_id=card.id, row=spec.row, col=spec.col, size_x=spec.size_x, size_y=spec.size_y,
+        ))
+    if not client.set_dashboard_cards(dashboard.id, placements):
+        _err(f"Cards created but the layout of dashboard {dashboard.id} could not be saved.")
+    for card_id in existing:
+        client.delete_card(card_id)
+
+    print(f"Forecast dashboard {dashboard.name!r} (id={dashboard.id}) with {len(placements)} cards "
+          f"for viewer={viewer.viewer_id} regions={list(viewer.regions)} run_id={active.run_id} env={environment}.")
+    print(f"Open: {mb_config.host.rstrip('/')}/dashboard/{dashboard.id}")
+
+
 def cmd_evaluate(viewer_id: str | None = None, allow_full_access: bool = False) -> None:
     """evaluate: run the sanity-check evaluation (v1.1).
 
@@ -1436,6 +1543,8 @@ def main(argv: list[str] | None = None) -> None:
         print("  generate-semantic-layer [--export-ossie PATH]")
         print("                                      Read canonical Ossie and generate JSON/Markdown derivatives; optionally export a copy")
         print("  metabase <setup|...>                v2.1 Metabase integration (`metabase setup` to bootstrap)")
+        print("  metabase forecast-dashboard --viewer ID [--env ENV] [--replace]")
+        print("                                      Predictive dashboard from the Ossie forecast metrics (RLS)")
         print("  ask <question> [--viewer <id>] [--no-metabase] [--session <id>] [--json]")
         print("                                      Translate a natural-language question to SQL")
         print("                                      (--viewer <id> resolves a person from the")
@@ -1483,7 +1592,7 @@ def main(argv: list[str] | None = None) -> None:
         # Subcommands: setup | status | teardown | reset-cards.
         # T011 US1: metabase setup. T029-T031 US4: the others.
         if not rest:
-            _err("Usage: python -m src.cli.main metabase <setup|status|teardown|reset-cards|cards>")
+            _err("Usage: python -m src.cli.main metabase <setup|status|teardown|reset-cards|cards|forecast-dashboard>")
         sub = rest[0]
         sub_rest = rest[1:]
         # T011 / T012-T014 (US1)
@@ -1505,7 +1614,34 @@ def main(argv: list[str] | None = None) -> None:
         if sub == "cards":
             cmd_metabase_cards()
             return
-        _err(f"Unknown metabase subcommand: {sub!r}. Use setup|status|teardown|reset-cards|cards.")
+        if sub == "forecast-dashboard":
+            fd_viewer: str | None = None
+            fd_environment = "prod"
+            fd_replace = False
+            i = 0
+            while i < len(sub_rest):
+                tok = sub_rest[i]
+                if tok in {"--viewer", "--env"} and i + 1 < len(sub_rest):
+                    if tok == "--viewer":
+                        fd_viewer = sub_rest[i + 1]
+                    else:
+                        fd_environment = sub_rest[i + 1]
+                    i += 2
+                    continue
+                if tok == "--replace":
+                    fd_replace = True
+                    i += 1
+                    continue
+                fd_viewer = None
+                break
+            if fd_viewer is None:
+                _err("Usage: python -m src.cli.main metabase forecast-dashboard --viewer <id> "
+                     "[--env <dev|staging|prod>] [--replace]")
+            if fd_environment not in {"dev", "staging", "prod"}:
+                _err(f"Invalid environment: {fd_environment!r}. Use dev|staging|prod.")
+            cmd_metabase_forecast_dashboard(fd_viewer, fd_environment, fd_replace)
+            return
+        _err(f"Unknown metabase subcommand: {sub!r}. Use setup|status|teardown|reset-cards|cards|forecast-dashboard.")
         return
     if command == "ask":
         # Parse v2.0/v2.1 flags: --viewer <id>, --allow-full-access,

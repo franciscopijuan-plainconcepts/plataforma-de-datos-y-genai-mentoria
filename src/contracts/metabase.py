@@ -128,6 +128,22 @@ class DashboardItem(BaseModel):
     dashboard_id: int
 
 
+class DashcardPlacement(BaseModel):
+    """Where a card sits on a dashboard grid (Metabase uses 24 columns).
+
+    v3.3: used by `MetabaseClient.set_dashboard_cards` to lay out scripted
+    dashboards in one `PUT /api/dashboard/{id}` call.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    card_id: int
+    row: int = Field(ge=0)
+    col: int = Field(ge=0, le=23)
+    size_x: int = Field(ge=1, le=24)
+    size_y: int = Field(ge=1)
+
+
 class Dashboard(BaseModel):
     """A Metabase dashboard aggregating multiple cards."""
 
@@ -161,6 +177,7 @@ __all__ = [
     "Card",
     "Collection",
     "DashboardItem",
+    "DashcardPlacement",
     "Dashboard",
     "MetabaseSession",
 ]

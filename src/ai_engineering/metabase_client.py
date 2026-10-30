@@ -32,6 +32,7 @@ from src.contracts.metabase import (
     Collection,
     Dashboard,
     DashboardItem,
+    DashcardPlacement,
     MetabaseConfig,
 )
 from src.contracts.semantic_layer import SemanticViewer
@@ -334,6 +335,7 @@ class MetabaseClient:
         display: str,
         description: str | None = None,
         db_id: int = 1,
+        visualization_settings: dict[str, object] | None = None,
     ) -> Card | None:
         """POST /api/card to create a Metabase native-query card.
 
@@ -350,7 +352,7 @@ class MetabaseClient:
                 "database": db_id,
             },
             "display": display,
-            "visualization_settings": {},
+            "visualization_settings": visualization_settings or {},
             "collection_id": collection_id,
         }
         # description is optional but useful for governance traceability.
@@ -480,6 +482,51 @@ class MetabaseClient:
                 "Metabase add_card_to_dashboard failed for card %s: %s", card_id, exc
             )
             return None
+
+    def get_dashboard_card_ids(self, dashboard_id: int) -> list[int] | None:
+        """GET /api/dashboard/{id}: ids of the cards placed on it (None on failure)."""
+        try:
+            response = self._request_with_reauth("GET", f"/api/dashboard/{dashboard_id}")
+            response.raise_for_status()
+            data = response.json()
+        except httpx.HTTPError as exc:
+            _logger.warning("Metabase get_dashboard_card_ids(%s) failed: %s", dashboard_id, exc)
+            return None
+        dashcards = data.get("dashcards", data.get("ordered_cards", []))
+        return [int(item["card_id"]) for item in dashcards if item.get("card_id") is not None]
+
+    def set_dashboard_cards(
+        self, dashboard_id: int, placements: list[DashcardPlacement]
+    ) -> bool:
+        """PUT /api/dashboard/{id} with the full dashcard layout (v3.3).
+
+        Metabase >= 0.47 replaces the dashboard's cards with this list;
+        negative ids mark new dashcards. Returns True on success.
+        """
+        body: dict[str, object] = {
+            "dashcards": [
+                {
+                    "id": -(index + 1),
+                    "card_id": placement.card_id,
+                    "row": placement.row,
+                    "col": placement.col,
+                    "size_x": placement.size_x,
+                    "size_y": placement.size_y,
+                    "parameter_mappings": [],
+                    "visualization_settings": {},
+                }
+                for index, placement in enumerate(placements)
+            ],
+        }
+        try:
+            response = self._request_with_reauth(
+                "PUT", f"/api/dashboard/{dashboard_id}", json_payload=body
+            )
+            response.raise_for_status()
+            return True
+        except httpx.HTTPError as exc:
+            _logger.warning("Metabase set_dashboard_cards(%s) failed: %s", dashboard_id, exc)
+            return False
 
     # ------------------------------------------------------------------
     # Display type heuristics (research.md Part E)
