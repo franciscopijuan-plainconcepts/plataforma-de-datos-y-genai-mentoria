@@ -14,9 +14,9 @@ pendientes del commit/push/PR del usuario.
 
 ## Estado actual (snapshot)
 
-- Fecha de actualizacion: 2026-09-02
-- Branch principal: feature/diego/ml-dashboard (roadmap convergido hasta Metabase v2.1 + Sales Prediction MLOps v3.0 + Batch Forecast Seeding v3.1)
-- Estado global: v3.0 implementado y validado; v3.1 (batch forecast seeding, sin LLM) implementado y validado end-to-end
+- Fecha de actualizacion: 2026-10-30
+- Branch principal: feature/diego/forecast-semantic (roadmap convergido hasta Metabase v2.1 + Sales Prediction MLOps v3.0 + Batch Forecast Seeding v3.1 + forecast semantic/accuracy/dashboard v3.3)
+- Estado global: v3.0 implementado y validado; v3.1 (batch forecast seeding, sin LLM) implementado y validado end-to-end; v3.3 (métricas de forecast en Ossie, backtest fila a fila y dashboard predictivo; parcial de M5) implementado y validado end-to-end, con una pasada de revisión/QA aplicada
 - Ambito completado:
   - Warehouse local PostgreSQL en Docker (v0 baseline)
   - Ingestion desde Global Superstore Data.xlsx (v0)
@@ -122,11 +122,34 @@ pendientes del commit/push/PR del usuario.
   - Sobre `Predictions`: `predicted_sales` y `avg_predicted_line_sales`.
   - Sobre `Forecast Accuracy`: `backtest_actual_sales`, `backtest_predicted_sales`, `forecast_abs_error`, `forecast_wape` y `forecast_bias`.
   - El modelo queda en `content_version` 1.1.0, con 15 métricas y 5 datasets.
-- **Backtest fila a fila (`backtest-sales-model`, automático en `bootstrap`).**
+  - `derives_from` no puede cruzar tablas y `uses_returns` solo se permite en métricas de Orders. Las 7 métricas nuevas salieron del agente `propose_semantic_update.py` (ahora con soporte de `source_table`) y se revisaron a mano (3 renombrados).
+- **Backtest fila a fila (`backtest-sales-model [--env] [--force]`, automático en `bootstrap` con `SEED_FORECAST_BACKTEST`).**
   - El forecast va con el reloj real y Orders termina en 2017, así que "el mes real que llega" se simula con el holdout cronológico del run activo, que el modelo nunca vio al entrenar.
-  - Cada línea del holdout se puntúa y se guarda en `Forecast Backtest`. La view `Forecast Accuracy` la agrega por mes × Region × Category.
-  - Es idempotente por `Run ID`, así que cada reentrenamiento añade su historial. Esa es la base del drift monitoring.
-- **Dashboard predictivo (`metabase forecast-dashboard --viewer <id>`).** Tiene 6 cards construidas desde las métricas Ossie, con SQL gobernado por RLS y ejecutado antes de publicar. `--replace` permite reconstruirlo y solo borra las cards que creó el propio comando. Las cards fijan el `run_id` activo y filtran por `CURRENT_DATE`: tras promocionar otro run, o pasados los meses sembrados, hay que resembrar y relanzarlo con `--replace`.
+  - Reproduce el split cronológico exacto del run; si el `data_hash` o los parámetros del split no coinciden, puntúa solo las filas estrictamente posteriores a la fecha de corte.
+  - Cada línea del holdout se puntúa y se guarda en `Forecast Backtest`. La view `Forecast Accuracy` la agrega por Run ID × mes × Region × Category (Actual Sales, Predicted Sales, Abs Error, Line Count).
+  - Es idempotente por `Run ID`, así que cada reentrenamiento añade su historial. Esa es la base del drift monitoring. `--force` borra las filas del run activo y lo vuelve a puntuar (p. ej. tras corregir el modelo).
+  - Resultado real con los datos actuales: 10.258 líneas de holdout (jul–dic 2017), WAPE ≈ 14,1 %, sesgo ≈ −0,9 %.
+  - `bootstrap` crea siempre la tabla `Forecast Backtest` y la view `Forecast Accuracy`, aunque el backtest se salte o falle.
+- **Dashboard predictivo (`metabase forecast-dashboard --viewer <id> [--env] [--replace]`).**
+  - Tiene 6 cards construidas desde las métricas Ossie por nombre (forecast del próximo mes = ticket medio predicho por línea, WAPE, sesgo, histórico mensual, forecast de los próximos meses y backtest previsto vs real), con SQL gobernado por RLS (Region) y ejecutado antes de publicar.
+  - Idempotente: si el dashboard ya tiene cards, se salta. `--replace` lo reconstruye y solo borra las cards que creó el propio comando (marcadas con `source=forecast-dashboard` en la descripción), conservando las demás. Si falla, hace rollback de las cards que había creado.
+  - Las cards fijan el `run_id` activo y filtran por `CURRENT_DATE`: tras promocionar otro run, o pasados `SEED_SALES_PREDICTIONS_MONTHS` meses desde la siembra, hay que resembrar y relanzarlo con `--replace`.
+- **Preguntas en lenguaje natural (`ask`/`chart` y `app_web.py`).** `Forecast Accuracy` se consulta bajo RLS como `Orders` y `Predictions`. Con un run activo en `SEED_SALES_PREDICTIONS_ENV` (default `prod`), el prompt restringe `Predictions` a ese `"Environment"` y `"Run ID"` y `Forecast Accuracy` a ese `"Run ID"`, salvo que la pregunta compare runs o entornos de forma explícita. También explica que `Predicted Sales` es el forecast de UNA línea de pedido representativa (usar `AVG`; nunca presentar `SUM` como total mensual). Las métricas fuera de Orders se etiquetan `[FROM "<tabla>"]` en el prompt.
+- **Fix Metabase v0.58.** Los dashboards se buscan por los items de la colección (el filtro antiguo devolvía 400), lo que también arregla los dashboards de `ask --session`.
+- **Revisión/QA aplicada sobre v3.3.**
+  - `gov_bypass` real en las descripciones de las cards (solo `true` para un viewer local/dev con acceso completo).
+  - Rollback de las cards creadas si falla la publicación del dashboard; `--replace` solo toca sus propias cards.
+  - Holdout exacto del run en el backtest y vista `Forecast Accuracy` siempre creada.
+  - Validación de dependencias entre métricas: `derives_from` sin cruzar tablas y `uses_returns` solo en Orders.
+  - Scoping por run en el prompt de `ask`/`chart` (ver arriba).
+  - `Predicted Sales` con clamp a 0 (Sales no puede ser negativo) en el camino de predicción compartido por `predict-sales`/siembra y el backtest.
+  - `backtest-sales-model --force` para re-puntuar el run activo.
+  - `bootstrap` pasa el esquema de Orders del workbook que carga (también con `--source <file>`) a la siembra y al backtest, por lo que estos pasos best-effort nunca abortan el bootstrap.
+- **Limitaciones conocidas.**
+  - Los perfiles de forecast solo cubren los 10 pares Region × Category más frecuentes (hoy todos Office Supplies): algunos viewers (p. ej. `marilene_rousseau`, Caribbean) ven las cards de forecast vacías; histórico y backtest sí tienen datos.
+  - `Orders.Region = 'Canada'` no existe en `People` (mismatch de taxonomía preexistente, ver M6).
+  - Histórico (2014–2017) y forecast (desde el próximo mes) son cards separadas por el hueco entre ambos.
+  - Los umbrales de alerta de drift siguen pendientes en M5.
 
 ## Calidad tecnica actual
 
@@ -139,8 +162,9 @@ pendientes del commit/push/PR del usuario.
   - [src/mlops](src/mlops)
   - [src/cli](src/cli)
 - Calidad validada:
-  - `uv run pytest tests/ -x` → 160 passed, 2 skipped
-  - `uv run mypy --strict src/mlops src/contracts/mlops.py src/cli/main.py tests/` → 0 errores
+  - `uv run --frozen python -m pytest -q tests/unit tests/contract -k 'not test_is_setup_complete_false_when_setup_token_present'` → 377 passed, 1 deselected (mock Metabase defectuoso de baseline) (2026-10-30)
+  - Integraciones PostgreSQL (`RUN_SEMANTIC_PG_TESTS=1 RUN_SEMANTIC_LIVE_TESTS=1`: referencia, live read-only, candidato Ossie, rollback) → 44 passed
+  - `uv run --frozen python -m mypy src --follow-imports=silent` → solo 4 errores previos en `src/mlops/seed_predictions.py` (anteriores a v3.3)
   - Metabase quedó validado por su bootstrap idempotente, boundary tests dedicados y la publicación automática de governed SQL cards desde `ask`.
 
 ## Riesgos y puntos de atencion
@@ -162,12 +186,13 @@ Mitigada en v2.0 por el Semantic Layer, pero la calidad de prompts/metricas sigu
 
 ## Siguiente plan de ejecucion recomendado
 
-1. Definir feature v3.1 para observabilidad MLOps (drift, alertas, reporting de producción).
+1. Cerrar M5: umbral de alerta de drift sobre `forecast_wape` entre runs (¿umbral de negocio o estadístico?), apoyado en el historial por `Run ID` de `Forecast Accuracy`, y approval flow para la promoción de modelos.
 2. Evaluar gobierno del training path si se introducen modelos por región o por tenant.
-3. Resolver el mismatch `People.Region` vs `Orders.Region` heredado del Semantic Layer.
-4. Diseñar RBAC column-level y audit logging persistente si la plataforma pasa de CLI local a servicio compartido.
-5. Mantener reproducibilidad con gates de CI sobre `pytest` + `mypy --strict`.
-6. Consolidar la convivencia del doble `specs/004-*` en un proximo cleanup documental o de renombrado planificado.
+3. Resolver el mismatch `People.Region` vs `Orders.Region` heredado del Semantic Layer (`Orders.Region = 'Canada'` no existe en `People`).
+4. Ampliar los perfiles de forecast más allá del top-10 Region × Category (hoy todo Office Supplies) para que todos los viewers vean las cards de forecast con datos.
+5. Diseñar RBAC column-level y audit logging persistente si la plataforma pasa de CLI local a servicio compartido.
+6. Mantener reproducibilidad con gates de CI sobre `pytest` + `mypy --strict`.
+7. Consolidar la convivencia del doble `specs/004-*` en un proximo cleanup documental o de renombrado planificado.
 
 ## Backlog de seguimiento (editable)
 
@@ -220,6 +245,12 @@ Bloque cerrado: Métricas de forecast en Ossie + precisión del forecast + dashb
 Cambio principal: perfil Ossie con tablas del warehouse; 7 métricas nuevas generadas con el agente doc → Ossie y revisadas a mano; `backtest-sales-model` y la view `Forecast Accuracy`; `metabase forecast-dashboard`.
 Impacto: el error del modelo (WAPE/sesgo) se puede consultar por NL, en la capa semántica y en Metabase, siempre bajo RLS. El historial por run permite detectar degradación entre reentrenamientos.
 Siguiente paso: umbral de alerta de drift sobre `forecast_wape` entre runs (pregunta abierta del agente: ¿umbral de negocio o estadístico?), approval flow y governance del training path.
+
+Fecha: 2026-10-30
+Bloque cerrado: Revisión/QA de v3.3 (hardening)
+Cambio principal: `gov_bypass` real en las cards, rollback y `--replace` acotado a las cards propias, holdout exacto en el backtest, view `Forecast Accuracy` siempre creada, validación de `derives_from`/`uses_returns`, scoping por run en el prompt de `ask`/`chart`, clamp de `Predicted Sales` a 0, `backtest-sales-model --force` y `bootstrap` robusto (esquema de Orders del workbook cargado, también con `--source`). Además, fix de la búsqueda de dashboards en Metabase v0.58.
+Impacto: las respuestas NL sobre forecast y precisión no mezclan runs ni entornos, el dashboard no deja cards huérfanas y la siembra/backtest nunca abortan el bootstrap.
+Siguiente paso: alerta de drift sobre `forecast_wape`, ampliar los perfiles de forecast más allá del top-10 y resolver el mismatch Canada.
 
 ## Onboarding rapido para continuar desde aqui
 

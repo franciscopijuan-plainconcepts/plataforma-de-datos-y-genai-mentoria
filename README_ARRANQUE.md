@@ -54,6 +54,12 @@ En la web, preguntar por ejemplo:
 - `países donde perdemos dinero`
 - `número de pedidos por año` ← se ve el `COUNT(DISTINCT "Order ID")` de la
   capa semántica
+- `¿Cuál es el WAPE del modelo por categoría?` ← precisión del forecast, sale
+  de la view `Forecast Accuracy` (necesita el backtest, ver más abajo)
+- `¿Cuál es el sesgo del forecast por región?`
+- `¿Cuál es el ticket medio predicho por línea en los próximos meses?` ←
+  `Predicted Sales` es el forecast de UNA línea de pedido, nunca un total
+  mensual
 
 O por CLI sin la web:
 
@@ -63,6 +69,39 @@ uv run python -m src.cli.main ask --viewer marilene_rousseau "ventas por categor
 
 El `--viewer` es una persona real de la tabla People: sus regiones limitan
 lo que ve (RLS). Cambiando de usuario cambian los números.
+
+## Forecast: backtest y dashboard predictivo (opcional)
+
+El `bootstrap` ya siembra `Predictions` y hace el backtest del modelo activo
+(se puede saltar con `SEED_FORECAST_BACKTEST=false` en el `.env`). Si el
+contenedor ya existía de antes o has reentrenado, se puede lanzar a mano:
+
+```bash
+uv run python -m src.cli.main backtest-sales-model --env prod
+```
+
+Es idempotente por run. Si se ha corregido el modelo y hay que puntuar de
+nuevo el run activo: `backtest-sales-model --env prod --force`.
+
+Dashboard predictivo en Metabase para una persona (6 cards: forecast del
+próximo mes, WAPE, sesgo, histórico, forecast de los próximos meses y
+backtest previsto vs real):
+
+```bash
+uv run python -m src.cli.main metabase forecast-dashboard --viewer <persona de People>
+```
+
+Si ya tiene cards se salta; con `--replace` lo reconstruye (solo borra las
+cards que creó él). Las cards fijan el run y filtran por la fecha de hoy:
+pasados ~6 meses desde la siembra (o tras promocionar otro modelo) salen
+vacías → resembrar (`seed-sales-predictions --env prod --force`), repetir el
+backtest y relanzar con `--replace`.
+
+Ojo: los forecasts solo cubren los 10 pares Región × Categoría más frecuentes
+(hoy todo Office Supplies), así que con algunas personas (p. ej.
+`marilene_rousseau`, Caribbean) las cards de forecast salen vacías; las de
+histórico y backtest sí tienen datos. Para ver el forecast con datos, probar
+con un viewer de otra región.
 
 ## Apagarlo todo
 

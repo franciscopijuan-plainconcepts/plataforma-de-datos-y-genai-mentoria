@@ -466,6 +466,16 @@ a `import_ossie(text, dictionary, warehouse_tables)`:
 - Cada métrica declara `source_table` (Orders | Predictions | Forecast
   Accuracy). La fórmula se valida `FROM` esa tabla y solo con sus columnas.
   Returns solo es accesible desde Orders.
+- Las dependencias entre métricas respetan la tabla: `derives_from` no puede
+  cruzar tablas (una métrica solo deriva de otras de su misma `source_table`)
+  y `uses_returns` solo se permite en métricas de Orders.
+- `semantic/sales.ossie.yaml` queda en `content_version` 1.1.0 con 15 métricas:
+  8 de Orders, `predicted_sales` y `avg_predicted_line_sales` sobre
+  Predictions, y `backtest_actual_sales`, `backtest_predicted_sales`,
+  `forecast_abs_error`, `forecast_wape` y `forecast_bias` sobre Forecast
+  Accuracy. Se generaron con `propose_semantic_update.py` (que ahora admite
+  `source_table`) a partir de `ejemplos/metricas-forecast.md` y se revisaron a
+  mano (3 renombrados).
 - No se declaran dimensiones fuera de Orders, por lo que el bloque de
   dimensiones del prompt no cambia.
 - La proyección del workbook (8 métricas de Orders, 11 dimensiones) sigue
