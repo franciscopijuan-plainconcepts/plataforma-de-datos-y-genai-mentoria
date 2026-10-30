@@ -115,6 +115,19 @@ pendientes del commit/push/PR del usuario.
 - Se ejecuta automáticamente al final de `bootstrap` (best-effort — nunca hace fallar el bootstrap); controlable con `SEED_SALES_PREDICTIONS`/`SEED_SALES_PREDICTIONS_ENV`/`SEED_SALES_PREDICTIONS_MONTHS` (`.env.example`).
 - Nuevo comando `seed-sales-predictions [--env] [--months-ahead] [--force]` para re-sembrar manualmente sin un `bootstrap` completo.
 
+### Entregado en v3.3 (hecho, parcial de M5)
+
+- **Perfil Ossie con tablas del warehouse.** `import_ossie` acepta datasets que no vienen del workbook (`Predictions`, view `Forecast Accuracy`) validados contra su `TableDef`. Cada métrica declara `source_table`, su fórmula se valida FROM esa tabla, y Returns solo es accesible desde Orders.
+- **Métricas de forecast y precisión** propuestas por el agente doc → Ossie (`ejemplos/metricas-forecast.md`) y revisadas a mano antes de activarlas:
+  - Sobre `Predictions`: `predicted_sales` y `avg_predicted_line_sales`.
+  - Sobre `Forecast Accuracy`: `backtest_actual_sales`, `backtest_predicted_sales`, `forecast_abs_error`, `forecast_wape` y `forecast_bias`.
+  - El modelo queda en `content_version` 1.1.0, con 15 métricas y 5 datasets.
+- **Backtest fila a fila (`backtest-sales-model`, automático en `bootstrap`).**
+  - El forecast va con el reloj real y Orders termina en 2017, así que "el mes real que llega" se simula con el holdout cronológico del run activo, que el modelo nunca vio al entrenar.
+  - Cada línea del holdout se puntúa y se guarda en `Forecast Backtest`. La view `Forecast Accuracy` la agrega por mes × Region × Category.
+  - Es idempotente por `Run ID`, así que cada reentrenamiento añade su historial. Esa es la base del drift monitoring.
+- **Dashboard predictivo (`metabase forecast-dashboard --viewer <id>`).** Tiene 6 cards construidas desde las métricas Ossie, con SQL gobernado por RLS y ejecutado antes de publicar. `--replace` permite reconstruirlo.
+
 ## Calidad tecnica actual
 
 - Arquitectura alineada con constitucion en [.specify/memory/constitution.md](.specify/memory/constitution.md).
@@ -166,7 +179,7 @@ Mitigada en v2.0 por el Semantic Layer, pero la calidad de prompts/metricas sigu
 | M3 | v2.0 Semantic Layer + RLS Governance | Completado | - | 2026-08-17 | SemanticLayerDocument + GovernedQueryProvider (RLS enforced, Principle IV satisfied) |
 | M3.1 | v2.1 Metabase Integration | Completado | - | 2026-08-20 | Metabase + governed SQL cards + sessions + CLI ops + metabase_bootstrap.py |
 | M4 | v3.0 Sales Prediction Model (MLOps) | Completado | - | 2026-08-25 | Training + registry + promotion + inference + prediction history |
-| M5 | v3.1 MLOps Observability + Governance hardening | Parcial | - | TBD | Batch forecast seeding (`seed-sales-predictions`, auto en `bootstrap`) **Completado** 2026-09-02; drift monitoring, approval flow y training-path governance review siguen **Pendiente** |
+| M5 | v3.1 MLOps Observability + Governance hardening | Parcial | - | TBD | Batch forecast seeding (`seed-sales-predictions`, auto en `bootstrap`) **Completado** 2026-09-02; precisión del forecast (backtest + `Forecast Accuracy` + métricas Ossie + dashboard predictivo) **Completado** 2026-10-30; alertas/umbrales de drift, approval flow y training-path governance review siguen **Pendiente** |
 | M6 | v3.2 RBAC column-level + People.Region taxonomy + Audit | Pendiente | TBD | TBD | Resolución de mismatch Canada; auth real; audit persistente |
 
 ## Rutina de mantenimiento de este documento
@@ -201,6 +214,12 @@ Bloque cerrado: Batch forecast seeding (v3.1, parcial de M5)
 Cambio principal: `src/mlops/seed_predictions.py` + comando CLI `seed-sales-predictions`, integrado en `bootstrap` (best-effort, idempotente). Decisión de diseño explícita: forecast de dashboard es batch/no-LLM, no un trigger on-demand del cliente vía LLM — reutiliza `predict_sales()` sin lógica paralela.
 Impacto: `Predictions` queda poblada con forecasts de los próximos 6 meses inmediatamente tras `uv run python -m src.cli.main bootstrap`, sin dependencia de Postgres/LLM en tiempo de vista del dashboard (verificado end-to-end: primera corrida siembra 60 filas, segunda corrida idempotente las salta, `seed-sales-predictions --force` re-siembra).
 Siguiente paso: drift monitoring, approval flow y training-path governance review siguen pendientes (resto de M5).
+
+Fecha: 2026-10-30
+Bloque cerrado: Métricas de forecast en Ossie + precisión del forecast + dashboard predictivo (v3.3, parcial de M5)
+Cambio principal: perfil Ossie con tablas del warehouse; 7 métricas nuevas generadas con el agente doc → Ossie y revisadas a mano; `backtest-sales-model` y la view `Forecast Accuracy`; `metabase forecast-dashboard`.
+Impacto: el error del modelo (WAPE/sesgo) se puede consultar por NL, en la capa semántica y en Metabase, siempre bajo RLS. El historial por run permite detectar degradación entre reentrenamientos.
+Siguiente paso: umbral de alerta de drift sobre `forecast_wape` entre runs (pregunta abierta del agente: ¿umbral de negocio o estadístico?), approval flow y governance del training path.
 
 ## Onboarding rapido para continuar desde aqui
 

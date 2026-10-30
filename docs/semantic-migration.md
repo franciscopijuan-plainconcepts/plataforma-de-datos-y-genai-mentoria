@@ -452,3 +452,22 @@ RUN_SEMANTIC_METABASE_TESTS=1 uv run --frozen python -m pytest -q \
   tests/integration/test_semantic_rollback.py \
   -k 'not test_is_setup_complete_false_when_setup_token_present'
 ```
+
+## Datasets gestionados por el warehouse (v3.3)
+
+`Predictions` y la view `Forecast Accuracy` no vienen del workbook, por lo que
+el diccionario no los conoce. La composición (CLI y agente) pasa sus `TableDef`
+a `import_ossie(text, dictionary, warehouse_tables)`:
+
+- Los datasets del diccionario siguen siendo obligatorios. Los del warehouse
+  son opcionales, pero si se declaran cumplen las mismas reglas de campos
+  completos y PK verificada contra su `TableDef`. Cualquier otro dataset se
+  rechaza, y un `warehouse_tables` no puede ocultar uno del diccionario.
+- Cada métrica declara `source_table` (Orders | Predictions | Forecast
+  Accuracy). La fórmula se valida `FROM` esa tabla y solo con sus columnas.
+  Returns solo es accesible desde Orders.
+- No se declaran dimensiones fuera de Orders, por lo que el bloque de
+  dimensiones del prompt no cambia.
+- La proyección del workbook (8 métricas de Orders, 11 dimensiones) sigue
+  siendo idéntica a la legacy: `tests/integration/test_ossie_candidate.py`
+  compara ese subconjunto.

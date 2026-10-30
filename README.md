@@ -4,7 +4,7 @@ A Data and GenAI Platform that connects Generative AI to a Data Warehouse —
 with governed Semantic Layer (RLS), Text-to-SQL via Forge LLM, and Metabase
 visualization of governed SQL cards.
 
-> **Status**: v3.0 — Baseline + Text-to-SQL + Semantic Layer (RLS governance) + Metabase integration + Sales Prediction MLOps.
+> **Status**: v3.3 — Baseline + Text-to-SQL + Semantic Layer (RLS governance) + Metabase integration + Sales Prediction MLOps + forecast accuracy (backtest) and predictive dashboard.
 > The warehouse, data dictionary, NL→SQL pipeline, governed Semantic Layer, Metabase SQL-card flow, and end-to-end sales-model training/promotion/inference flow are delivered.
 > See [README_STATUS.md](README_STATUS.md) for the roadmap and current status (milestones M0–M4 delivered).
 
@@ -84,6 +84,34 @@ This platform lets you:
 - Try it: `uv run python -m src.cli.main ask "What is the average predicted sales for the South America region?" --viewer <person>`, or `uv run python -m src.cli.main ask "Compara las ventas reales con las predichas por región" --viewer <person>`.
 - Also fixed while validating this feature (pre-existing, unrelated bugs that blocked real testing): `SqlValidator` was mis-parsing single-quoted string literals (e.g. `WHERE "Region" = 'Caribbean'`) as unknown column references; `LlmClient.generate_sql` now strips an accidental surrounding ```` ```sql ... ``` ```` markdown fence if the LLM ignores the "no markdown" rule.
 
+### Forecast metrics, accuracy and predictive dashboard (v3.3)
+
+> The partner's doc → Ossie agent is used to grow the semantic model: a
+> business doc ([`ejemplos/metricas-forecast.md`](ejemplos/metricas-forecast.md))
+> goes in, a validated candidate comes out, and a human reviews it before it
+> replaces `semantic/sales.ossie.yaml`.
+
+- **Ossie profile accepts warehouse-managed datasets.** `Predictions` and the `Forecast Accuracy` view are declared in `semantic/sales.ossie.yaml` (content version 1.1.0) next to Orders/Returns/People. They are not in the workbook dictionary, so `import_ossie(..., warehouse_tables=forecast_semantic_tables())` validates them against their own `TableDef`. Every metric declares its `source_table`, and its formula is validated FROM that table only. Returns stays reachable only from Orders.
+- **New metrics.**
+  - On `Predictions`: `predicted_sales` and `avg_predicted_line_sales`.
+  - On `Forecast Accuracy`: `backtest_actual_sales`, `backtest_predicted_sales`, `forecast_abs_error`, `forecast_wape` (headline error) and `forecast_bias`.
+  - The prompt tags non-Orders metrics with `[FROM "<table>"]`.
+- **Row-level backtest (`backtest-sales-model`, also runs at the end of `bootstrap`).**
+  - Forecasts follow the wall clock, but Orders ends in 2017, so future months never get actuals.
+  - Accuracy is measured on the active run's own chronological holdout instead (`Order Date >= split_cutoff_date`, never seen in training).
+  - Every holdout line is scored once and stored in `Forecast Backtest` (actual vs predicted).
+  - The `Forecast Accuracy` view aggregates it to month × Region × Category.
+  - It is idempotent per `Run ID`, so retraining appends a new run and keeps the per-model history. That history is the base for M5 drift monitoring.
+- **Predictive dashboard (`metabase forecast-dashboard --viewer <id>`).**
+  - Six cards built from the Ossie metrics by name: next-month forecast, WAPE, bias, monthly sales history, forecast for the next months, and backtest predicted vs actual by month.
+  - Every SQL goes through the `GovernedQueryProvider` (viewer's Region RLS) and is executed before anything is published.
+  - `--replace` rebuilds an existing dashboard.
+- **Caveats.**
+  - `Predicted Sales` is the forecast of **one representative order line**, not a monthly total. That's why the dashboard shows the average predicted line ticket.
+  - History (2014–2017) and forecast (next months from today) are separate cards, because there is a gap between them.
+  - Forecast profiles cover the 10 most frequent Region × Category pairs, so a viewer whose region is not among them gets empty forecast cards. The history and backtest cards still show data for that viewer.
+- Try it: `uv run python -m src.cli.main ask "¿Cuál es el WAPE del modelo por categoría?" --viewer <person>`.
+
 ### Milestones delivered
 
 | Milestone | Version | What it delivers |
@@ -96,6 +124,7 @@ This platform lets you:
 | M4 | v3.0 | Sales Prediction MLOps: training, registry, staged promotion, inference |
 | M4.1 | v3.1 | Batch forecast seeding: `Predictions` populated automatically on `bootstrap`, no LLM in the critical path |
 | M4.2 | v3.2 | `ask`/`chart`/`app_web.py` can query the `Predictions` table via natural language (SQL, RLS-governed) |
+| M5 (partial) | v3.3 | Forecast + accuracy metrics in Ossie, row-level backtest (`Forecast Accuracy`), scripted predictive Metabase dashboard |
 
 ---
 
@@ -371,6 +400,15 @@ uv run python -m src.cli.main seed-sales-predictions --env prod --force
 
 Re-runs the batch forecast seeding manually (e.g. after promoting a new run in Step 11, or to target a different `--env`/`--months-ahead`). `--force` bypasses the idempotency check that `bootstrap` relies on.
 
+### Step 14: (Optional) Backtest the model and build the predictive dashboard
+
+```bash
+uv run python -m src.cli.main backtest-sales-model --env prod      # already run by bootstrap; idempotent per run
+uv run python -m src.cli.main metabase forecast-dashboard --viewer <person> [--replace]
+```
+
+The backtest fills `Forecast Backtest` / `Forecast Accuracy` for the run active in `--env`. The dashboard command publishes a "Forecast: \<viewer\>" dashboard whose cards carry the viewer's regional RLS snapshot. Reseed (Step 13) and backtest again after promoting a new run, so the cards point to data for the active run.
+
 See [Ossie migration validation and limitations](docs/semantic-migration.md) for
 the current semantic workflow. The historical feature guides remain available:
 [`baseline`](specs/001-data-genai-platform-baseline/quickstart.md),
@@ -517,6 +555,8 @@ summary (`X / N correct`).
 | `predict-sales --env <env> ...` | Load the promoted model for an environment and predict `Sales` from the provided order features. |
 | `predict-sales-nl <question> --env <env>` | LLM extracts the prediction inputs from a natural-language question, then calls the same `predict_sales()` used above. |
 | `seed-sales-predictions [--env <env>] [--months-ahead N] [--force]` | Batch, no-LLM: train/promote if needed, then seed `Predictions` with the next N months of forecasts. Runs automatically at the end of `bootstrap`. |
+| `backtest-sales-model [--env <env>]` | Score the active run's out-of-sample holdout into `Forecast Backtest` (feeds the `Forecast Accuracy` view). Idempotent per run; runs automatically at the end of `bootstrap`. |
+| `metabase forecast-dashboard --viewer <id> [--env <env>] [--replace]` | Publish the predictive dashboard (6 governed cards built from the Ossie forecast metrics) for one viewer. |
 | `ask <question>` | Translate a natural-language question to SQL, apply RLS, execute, return typed rows. |
 | `ask --viewer <id>` | Login as a person (from the `People` table) and scope results to that person's region. |
 | `ask --allow-full-access` | Escape hatch for local/dev only (no RLS filtering). Logged as `gov.bypass`. |
@@ -554,6 +594,7 @@ positions and row multiplicity, ignoring presentation aliases and row order.
 | `SEED_SALES_PREDICTIONS` | No | `true` | Set to `false` to skip the automatic batch forecast seeding at the end of `bootstrap`. |
 | `SEED_SALES_PREDICTIONS_ENV` | No | `prod` | Environment whose promoted model is used (or auto-trained) to seed `Predictions`. |
 | `SEED_SALES_PREDICTIONS_MONTHS` | No | `6` | How many upcoming months to forecast per profile. |
+| `SEED_FORECAST_BACKTEST` | No | `true` | Set to `false` to skip the automatic backtest of the active model after seeding. |
 
 ---
 
