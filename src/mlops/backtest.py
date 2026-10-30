@@ -2,10 +2,14 @@
 
 Forecasts in `Predictions` target future months that the static Global
 Superstore data will never reach, so "predicted vs actual" is measured where
-actuals do exist: the model's own chronological holdout. Training fits only
-rows before `split_cutoff_date` (`src/mlops/training.py`), so every Orders
-line on/after that date is out-of-sample for the run. Each of those lines is
-scored once with the run's model and persisted in `Forecast Backtest`
+actuals do exist: the model's own chronological holdout.
+`chronological_split` (`src/mlops/split.py`) cuts the date-sorted rows by
+INDEX, so lines sharing `split_cutoff_date` can sit on both sides of the
+split; "on/after the cutoff" would leak training rows. The backtest therefore
+replays the run's exact split (same `data_hash`, tracked `test_fraction` /
+`min_test_rows`) and, when it cannot, keeps only lines strictly after the
+cutoff. Each holdout line is scored once with the run's model and persisted
+in `Forecast Backtest`
 (actual vs predicted `Sales`); the `Forecast Accuracy` view aggregates them to
 month x Region x Category, which is the grain the semantic metrics
 (`forecast_wape`, `forecast_bias`, ...) and the dashboard read.
@@ -23,20 +27,27 @@ from decimal import Decimal
 from typing import Protocol, runtime_checkable
 
 from src.contracts.data_access import BacktestRow, TableDef
-from src.contracts.mlops import ArtifactRegistryEntry, EnvironmentName, SalesFeatureRow
+from src.contracts.mlops import (
+    ArtifactRegistryEntry,
+    EnvironmentName,
+    FeatureSet,
+    ModelRunMetadata,
+    SalesFeatureRow,
+)
 from src.data_access.interfaces import DataProvider, QueryProvider, SchemaProvider
 from src.data_access.sql_validator import validate_sql
 from src.mlops.dataset import extract_feature_set
 from src.mlops.inference import predict_feature_rows
 from src.mlops.predictions_store import (
     BACKTEST_TABLE_NAME,
-    FORECAST_ACCURACY_SQL,
     FORECAST_ACCURACY_VIEW_NAME,
     backtest_table_def,
+    ensure_backtest_objects,
     forecast_accuracy_view_def,
     forecast_semantic_tables,
 )
 from src.mlops.registry import ArtifactRegistry, NoActiveModelError
+from src.mlops.split import chronological_split
 
 
 @runtime_checkable
@@ -44,20 +55,40 @@ class BacktestRepository(SchemaProvider, DataProvider, QueryProvider, Protocol):
     """A repository able to host the backtest table/view and read Orders."""
 
 
-def ensure_backtest_objects(schema_provider: SchemaProvider) -> None:
-    """Create the backtest table and (re)define the accuracy view (idempotent)."""
-    schema_provider.create_table(backtest_table_def())
-    schema_provider.create_or_replace_view(FORECAST_ACCURACY_VIEW_NAME, FORECAST_ACCURACY_SQL)
-
-
 def _utc(value: datetime) -> datetime:
     return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
 
 
-def select_holdout(rows: list[SalesFeatureRow], cutoff: datetime) -> list[SalesFeatureRow]:
-    """Out-of-sample rows for a run: on/after its split cutoff, with a known target."""
-    boundary = _utc(cutoff)
-    return [row for row in rows if row.sales is not None and _utc(row.order_date) >= boundary]
+def _replay_test_rows(feature_set: FeatureSet, metadata: ModelRunMetadata) -> list[SalesFeatureRow] | None:
+    """The run's exact test split, or None when it cannot be reproduced."""
+    fraction = metadata.hyperparameters.get("test_fraction")
+    min_rows = metadata.hyperparameters.get("min_test_rows")
+    if (feature_set.data_hash != metadata.data_hash
+            or not isinstance(fraction, (int, float)) or isinstance(fraction, bool)
+            or not isinstance(min_rows, int) or isinstance(min_rows, bool)):
+        return None
+    try:
+        _, test_rows = chronological_split(feature_set.rows, float(fraction), min_rows)
+    except ValueError:
+        return None
+    # Same data + same params is deterministic; still check it matches the run.
+    if (len(test_rows) != metadata.test_row_count
+            or _utc(test_rows[0].order_date) != _utc(metadata.split_cutoff_date)):
+        return None
+    return test_rows
+
+
+def select_holdout(feature_set: FeatureSet, metadata: ModelRunMetadata) -> list[SalesFeatureRow]:
+    """Rows the run never trained on, with a known target.
+
+    Exact test split when reproducible; otherwise only rows strictly after the
+    cutoff (every training row is on/before it, so those are always unseen).
+    """
+    rows = _replay_test_rows(feature_set, metadata)
+    if rows is None:
+        boundary = _utc(metadata.split_cutoff_date)
+        rows = [row for row in feature_set.rows if _utc(row.order_date) > boundary]
+    return [row for row in rows if row.sales is not None]
 
 
 def build_backtest_rows(
@@ -117,7 +148,7 @@ def run_backtest(
         return 0
 
     feature_set = extract_feature_set(repo, orders_table_def)
-    holdout = select_holdout(feature_set.rows, entry.metrics.split_cutoff_date)
+    holdout = select_holdout(feature_set, registry.read_run_metadata(entry))
     if not holdout:
         return 0
     model = registry.load_model(entry)

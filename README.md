@@ -98,7 +98,8 @@ This platform lets you:
   - The prompt tags non-Orders metrics with `[FROM "<table>"]`.
 - **Row-level backtest (`backtest-sales-model`, also runs at the end of `bootstrap`).**
   - Forecasts follow the wall clock, but Orders ends in 2017, so future months never get actuals.
-  - Accuracy is measured on the active run's own chronological holdout instead (`Order Date >= split_cutoff_date`, never seen in training).
+  - Accuracy is measured on the active run's own chronological holdout instead: the backtest replays the run's exact split (same `data_hash`, tracked `test_fraction`/`min_test_rows`), so it scores only rows never seen in training.
+  - The split cuts by row index, so lines on `split_cutoff_date` can be on both sides; when the split can't be replayed (data changed), only lines strictly after that date are scored.
   - Every holdout line is scored once and stored in `Forecast Backtest` (actual vs predicted).
   - The `Forecast Accuracy` view aggregates it to month × Region × Category.
   - It is idempotent per `Run ID`, so retraining appends a new run and keeps the per-model history. That history is the base for M5 drift monitoring.

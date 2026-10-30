@@ -143,6 +143,16 @@ def forecast_accuracy_view_def() -> TableDef:
     )
 
 
+def ensure_backtest_objects(schema_provider: SchemaProvider) -> None:
+    """Create the backtest table and (re)define the accuracy view (idempotent).
+
+    Lives here (no ML imports) so `bootstrap` can expose an empty, queryable
+    `Forecast Accuracy` even when the backtest itself is skipped or fails.
+    """
+    schema_provider.create_table(backtest_table_def())
+    schema_provider.create_or_replace_view(FORECAST_ACCURACY_VIEW_NAME, FORECAST_ACCURACY_SQL)
+
+
 def forecast_semantic_tables() -> dict[str, TableDef]:
     """Warehouse-managed datasets the Ossie model may declare (composition roots)."""
     return {
@@ -207,6 +217,7 @@ __all__ = [
     "forecast_semantic_tables",
     "PredictionsRepository",
     "build_prediction_row",
+    "ensure_backtest_objects",
     "ensure_predictions_table",
     "persist_prediction",
     "predictions_table_def",

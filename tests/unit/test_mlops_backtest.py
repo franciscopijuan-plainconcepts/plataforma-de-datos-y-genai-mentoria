@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import shutil
+import subprocess
+import sys
 from collections.abc import Iterator
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -13,7 +15,7 @@ import sqlglot
 from sqlglot import exp
 
 from src.contracts.data_access import BacktestRow, LoadResult, OrderRow, Row, TableDef
-from src.contracts.mlops import EvaluationMetrics, FeatureSet
+from src.contracts.mlops import EvaluationMetrics, FeatureSet, ModelRunMetadata, SalesFeatureRow
 from src.contracts.semantic_layer import SemanticViewer
 from src.contracts.text_to_sql import QueryRow
 from src.data_engineering.semantic_layer.resolver import SemanticQueryResolver
@@ -24,6 +26,7 @@ from src.mlops.predictions_store import (
     FORECAST_ACCURACY_SQL,
     FORECAST_ACCURACY_VIEW_NAME,
     backtest_table_def,
+    ensure_backtest_objects,
     forecast_accuracy_view_def,
 )
 from src.mlops.registry import ArtifactRegistry, NoActiveModelError
@@ -83,7 +86,11 @@ def promoted() -> Iterator[tuple[ArtifactRegistry, datetime]]:
         "iterations": 5, "depth": 2, "learning_rate": 0.1, "loss_function": "RMSE",
         "random_seed": 42, "allow_writing_files": False,
     })
-    metadata = metadata.model_copy(update={"data_hash": "hash-bt", "test_row_count": 5, "split_cutoff_date": cutoff})
+    # Tracked like `train_sales_models` does, so the backtest replays the split.
+    metadata = metadata.model_copy(update={
+        "data_hash": "hash-bt", "test_row_count": 5, "split_cutoff_date": cutoff,
+        "hyperparameters": {**metadata.hyperparameters, "test_fraction": 0.25, "min_test_rows": 5},
+    })
     metrics = EvaluationMetrics(rmse=1.0, mae=1.0, r2=0.5, test_row_count=5, split_cutoff_date=cutoff)
     entry = registry.persist_run("catboost", model, metadata, metrics)
     registry.promote(entry.run_id, "dev")
@@ -91,21 +98,60 @@ def promoted() -> Iterator[tuple[ArtifactRegistry, datetime]]:
     shutil.rmtree(root)
 
 
-def _feature_set() -> FeatureSet:
-    rows = sample_training_rows()
-    return FeatureSet(rows=rows, data_hash="hash-bt", extracted_at=datetime.now(timezone.utc),
+def _feature_set(rows: list[SalesFeatureRow] | None = None, data_hash: str = "hash-bt") -> FeatureSet:
+    rows = rows if rows is not None else sample_training_rows()
+    return FeatureSet(rows=rows, data_hash=data_hash, extracted_at=datetime.now(timezone.utc),
                       source_table="Orders", row_count=len(rows))
+
+
+def _metadata(cutoff: datetime, **hyperparameters: float | int) -> ModelRunMetadata:
+    return ModelRunMetadata(
+        model_name="catboost", hyperparameters=dict(hyperparameters), library_versions={},
+        data_hash="hash-bt", trained_at=datetime.now(timezone.utc), train_row_count=15,
+        test_row_count=5, split_cutoff_date=cutoff, training_duration_ms=0,
+    )
+
+
+def _rows_sharing_the_cutoff_date() -> list[SalesFeatureRow]:
+    """Rows 13..16 share one date: the index split puts 13-14 in train, 15-16 in test."""
+    rows = sample_training_rows()
+    shared = rows[13].order_date
+    return [row.model_copy(update={"order_date": shared}) if 13 <= index <= 16 else row
+            for index, row in enumerate(rows)]
 
 
 def _orders_def() -> TableDef:
     return _build_test_table_defs()[0]
 
 
-def test_select_holdout_keeps_out_of_sample_rows_with_target() -> None:
+def test_select_holdout_replays_the_exact_split_on_a_shared_cutoff_date() -> None:
+    rows = _rows_sharing_the_cutoff_date()
+    metadata = _metadata(rows[15].order_date, test_fraction=0.25, min_test_rows=5)
+    holdout = select_holdout(_feature_set(rows), metadata)
+    # Rows 13-14 trained the model although they share the cutoff date.
+    assert holdout == rows[15:]
+    assert sum(row.order_date >= metadata.split_cutoff_date for row in rows) == 7
+
+
+@pytest.mark.parametrize("data_hash, hyperparameters", [
+    ("other-data", {"test_fraction": 0.25, "min_test_rows": 5}),
+    ("hash-bt", {}),
+    ("hash-bt", {"test_fraction": 0.5, "min_test_rows": 5}),
+])
+def test_select_holdout_falls_back_to_strictly_after_the_cutoff(
+    data_hash: str, hyperparameters: dict[str, float | int],
+) -> None:
+    rows = _rows_sharing_the_cutoff_date()
+    cutoff = rows[15].order_date.replace(tzinfo=None)
+    holdout = select_holdout(_feature_set(rows, data_hash), _metadata(cutoff, **hyperparameters))
+    assert holdout == rows[17:]
+
+
+def test_select_holdout_drops_rows_without_target() -> None:
     rows = sample_training_rows()
-    naive_cutoff = rows[15].order_date.replace(tzinfo=None)
-    holdout = select_holdout([*rows, rows[19].model_copy(update={"sales": None})], naive_cutoff)
-    assert [row.order_date for row in holdout] == [row.order_date for row in rows[15:]]
+    rows[19] = rows[19].model_copy(update={"sales": None})
+    metadata = _metadata(rows[15].order_date, test_fraction=0.25, min_test_rows=5)
+    assert select_holdout(_feature_set(rows), metadata) == rows[15:19]
 
 
 def test_run_backtest_scores_holdout_once_and_persists(promoted: tuple[ArtifactRegistry, datetime]) -> None:
@@ -137,6 +183,18 @@ def test_run_backtest_is_idempotent_per_run(promoted: tuple[ArtifactRegistry, da
         assert run_backtest(repo, _orders_def(), registry, environment="dev") == 0
     assert extract.call_count == 1
     assert len(repo.loaded) == 5
+
+
+def test_ensure_backtest_objects_needs_no_ml_imports() -> None:
+    """`bootstrap` creates the view unconditionally, before any ML import."""
+    repo = _FakeRepo()
+    ensure_backtest_objects(repo)
+    ensure_backtest_objects(repo)
+    assert repo.tables == [BACKTEST_TABLE_NAME] * 2
+    assert repo.views == {FORECAST_ACCURACY_VIEW_NAME: FORECAST_ACCURACY_SQL}
+    probe = ("import sys, src.mlops.predictions_store; "
+             "sys.exit(any(m in sys.modules for m in ('catboost', 'sklearn')))")
+    assert subprocess.run([sys.executable, "-c", probe], check=False).returncode == 0
 
 
 def test_run_backtest_requires_active_model(promoted: tuple[ArtifactRegistry, datetime]) -> None:

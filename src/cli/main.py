@@ -279,9 +279,13 @@ def cmd_bootstrap(source_file: str | None = None) -> None:
         # Historic log of predict-sales calls (empty at bootstrap time —
         # populated as predictions are made). Created up-front so it shows
         # up in `validate`/`list_tables` immediately after bootstrap.
-        from src.mlops.predictions_store import ensure_predictions_table
+        from src.mlops.predictions_store import ensure_backtest_objects, ensure_predictions_table
 
         ensure_predictions_table(repo)
+        # v3.3: same for `Forecast Backtest` + the `Forecast Accuracy` view —
+        # `ask` and the forecast dashboard always expose the view, so it must
+        # exist even when the (best-effort) backtest below is skipped or fails.
+        ensure_backtest_objects(repo)
 
         # --- Seed future Sales predictions (v3.1, POC groundwork) ---
         # Best-effort + non-fatal: bootstrap MUST still succeed (baseline
