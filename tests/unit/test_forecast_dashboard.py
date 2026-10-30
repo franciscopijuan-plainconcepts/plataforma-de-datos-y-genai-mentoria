@@ -13,7 +13,14 @@ import sqlglot
 
 from src.ai_engineering import metabase_client
 from src.cli import main as cli
-from src.contracts.metabase import Card, Dashboard, DashcardPlacement, MetabaseConfig, MetabaseSession
+from src.contracts.metabase import (
+    Card,
+    Dashboard,
+    DashboardCardRef,
+    DashcardPlacement,
+    MetabaseConfig,
+    MetabaseSession,
+)
 from src.contracts.text_to_sql import PreparedQuery
 from src.data_engineering.semantic_layer import governed_provider
 from src.mlops import registry as mlops_registry
@@ -98,18 +105,48 @@ def test_set_dashboard_cards_puts_full_layout() -> None:
     assert [(item["id"], item["card_id"], item["size_x"]) for item in body["dashcards"]] == [(-1, 11, 8), (-2, 12, 24)]
 
 
-def test_dashboard_card_ids_and_http_errors() -> None:
+def test_dashboard_cards_and_http_errors() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/api/session":
             return httpx.Response(200, json={"id": "token"})
         if request.url.path == "/api/dashboard/7":
-            return httpx.Response(200, json={"dashcards": [{"card_id": 3}, {"card_id": None}, {"card_id": 4}]})
+            return httpx.Response(200, json={"dashcards": [
+                {"id": 30, "card_id": 3, "row": 0, "col": 0, "size_x": 8, "size_y": 4,
+                 "card": {"description": "source=forecast-dashboard run_id=r"}},
+                {"id": 31, "card_id": None, "row": 4, "col": 0, "size_x": 24, "size_y": 2,
+                 "visualization_settings": {"text": "nota"}, "card": {}},
+            ]})
+        if request.url.path == "/api/dashboard/9":
+            return httpx.Response(200, json={"dashcards": [{"card_id": 3}]})
         return httpx.Response(500)
 
     client = _client_with_handler(handler)
-    assert client.get_dashboard_card_ids(7) == [3, 4]
-    assert client.get_dashboard_card_ids(8) is None
+    refs = client.get_dashboard_cards(7)
+    assert refs is not None
+    assert [(ref.placement.dashcard_id, ref.placement.card_id) for ref in refs] == [(30, 3), (31, None)]
+    assert refs[0].description == "source=forecast-dashboard run_id=r" and refs[1].description is None
+    assert refs[1].placement.visualization_settings == {"text": "nota"}
+    assert client.get_dashboard_cards(8) is None
+    assert client.get_dashboard_cards(9) is None  # dashcard without id: unexpected payload
     assert client.set_dashboard_cards(8, []) is False
+
+
+def test_set_dashboard_cards_keeps_existing_dashcards() -> None:
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/session":
+            return httpx.Response(200, json={"id": "token"})
+        seen.append(request)
+        return httpx.Response(200, json={"id": 7})
+
+    client = _client_with_handler(handler)
+    kept = DashcardPlacement(card_id=None, row=20, col=0, size_x=24, size_y=2, dashcard_id=31,
+                             visualization_settings={"text": "nota"})
+    assert client.set_dashboard_cards(7, [DashcardPlacement(card_id=11, row=0, col=0, size_x=8, size_y=4), kept])
+    body = json.loads(seen[0].content)["dashcards"]
+    assert [(item["id"], item["card_id"]) for item in body] == [(-1, 11), (31, None)]
+    assert body[1]["visualization_settings"] == {"text": "nota"} and body[1]["row"] == 20
 
 
 # --- CLI composition: governed execution before publishing, idempotency ---
@@ -117,8 +154,10 @@ def test_dashboard_card_ids_and_http_errors() -> None:
 class _FakeProvider:
     def __init__(self, fail_on: str | None = None) -> None:
         self.fail_on = fail_on
+        self.prepared = 0
 
     def prepare_query(self, sql: str, table_def: object) -> PreparedQuery:
+        self.prepared += 1
         return PreparedQuery(generated_sql=sql, sql=f"/*governed*/ {sql}",
                              viewer=_VIEWER, model_sha256="sha")
 
@@ -129,28 +168,45 @@ class _FakeProvider:
 
 
 class _FakeMetabase:
-    def __init__(self, existing: list[int]) -> None:
+    def __init__(self, existing: list[DashboardCardRef], reject_card: int | None = None,
+                 layout_ok: bool = True) -> None:
         self.existing = existing
+        self.reject_card = reject_card
+        self.layout_ok = layout_ok
         self.calls: list[tuple[str, object]] = []
+        self.descriptions: list[str] = []
+        self.layout: list[DashcardPlacement] = []
 
     def get_or_create_dashboard(self, name: str, collection_id: int) -> Dashboard:
         return Dashboard(id=9, name=name, collection_id=collection_id)
 
-    def get_dashboard_card_ids(self, dashboard_id: int) -> list[int]:
+    def get_dashboard_cards(self, dashboard_id: int) -> list[DashboardCardRef]:
         return self.existing
 
-    def create_card(self, **kwargs: object) -> Card:
+    def create_card(self, **kwargs: object) -> Card | None:
+        if len(self.descriptions) + 1 == self.reject_card:
+            return None
         self.calls.append(("create", kwargs["sql"]))
-        return Card(id=100 + len(self.calls), name=str(kwargs["name"]), sql=str(kwargs["sql"]),
+        self.descriptions.append(str(kwargs["description"]))
+        return Card(id=100 + len(self.descriptions), name=str(kwargs["name"]), sql=str(kwargs["sql"]),
                     collection_id=5, display="table")
 
     def set_dashboard_cards(self, dashboard_id: int, placements: list[DashcardPlacement]) -> bool:
         self.calls.append(("layout", len(placements)))
-        return True
+        self.layout = placements
+        return self.layout_ok
 
     def delete_card(self, card_id: int) -> bool:
         self.calls.append(("delete", card_id))
         return True
+
+
+def _ref(dashcard_id: int, card_id: int | None, description: str | None, row: int = 0) -> DashboardCardRef:
+    placement = DashcardPlacement(card_id=card_id, row=row, col=0, size_x=12, size_y=4, dashcard_id=dashcard_id)
+    return DashboardCardRef(placement=placement, description=description)
+
+
+_OWNED = "viewer_id=marilene_rousseau gov_bypass=False run_id=old source=forecast-dashboard created_at=x"
 
 
 _VIEWER = SemanticViewer(viewer_id="marilene_rousseau", regions=["Caribbean"])
@@ -180,25 +236,70 @@ def test_cli_publishes_governed_cards_and_layout(monkeypatch: pytest.MonkeyPatch
     created = [sql for kind, sql in metabase.calls if kind == "create"]
     assert len(created) == 6 and all(str(sql).startswith("/*governed*/") for sql in created)
     assert metabase.calls[-1] == ("layout", 6)
+    assert all("gov_bypass=False" in item and "source=forecast-dashboard" in item.split()
+               for item in metabase.descriptions)
     assert "http://mb.local/dashboard/9" in capsys.readouterr().out
 
 
+def test_cli_description_reports_governance_bypass(monkeypatch: pytest.MonkeyPatch) -> None:
+    metabase = _FakeMetabase(existing=[])
+    _wire(monkeypatch, _FakeProvider(), metabase)
+    bypass = SemanticViewer(viewer_id="dev", regions=["Caribbean"], allows_full_access=True, is_local_dev=True)
+    monkeypatch.setattr(cli, "_resolve_viewer", lambda *args: bypass)
+    cli.main(["metabase", "forecast-dashboard", "--viewer", "dev"])
+    assert len(metabase.descriptions) == 6
+    assert all("gov_bypass=True" in item for item in metabase.descriptions)
+
+
 def test_cli_publishes_nothing_if_a_card_fails(monkeypatch: pytest.MonkeyPatch) -> None:
-    metabase = _FakeMetabase(existing=[1])
+    metabase = _FakeMetabase(existing=[_ref(1, 1, _OWNED)])
     _wire(monkeypatch, _FakeProvider(fail_on="forecast_bias"), metabase)
     with pytest.raises(SystemExit):
         cli.main(["metabase", "forecast-dashboard", "--viewer", "marilene_rousseau", "--replace"])
     assert metabase.calls == []
 
 
-def test_cli_skips_existing_dashboard_unless_replace(monkeypatch: pytest.MonkeyPatch) -> None:
-    metabase = _FakeMetabase(existing=[1, 2])
-    _wire(monkeypatch, _FakeProvider(), metabase)
+def test_cli_skips_existing_dashboard_before_running_queries(monkeypatch: pytest.MonkeyPatch) -> None:
+    metabase = _FakeMetabase(existing=[_ref(1, 1, _OWNED), _ref(2, 2, _OWNED)])
+    provider = _FakeProvider()
+    _wire(monkeypatch, provider, metabase)
     cli.main(["metabase", "forecast-dashboard", "--viewer", "marilene_rousseau"])
-    assert metabase.calls == []
+    assert metabase.calls == [] and provider.prepared == 0
     cli.main(["metabase", "forecast-dashboard", "--viewer", "marilene_rousseau", "--replace"])
+    assert provider.prepared == 6
     kinds = [kind for kind, _ in metabase.calls]
     assert kinds == ["create"] * 6 + ["layout", "delete", "delete"]
+
+
+def test_cli_replace_deletes_only_its_own_cards(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    foreign_card = _ref(11, 77, "a card a user added", row=0)
+    foreign_text = _ref(12, None, None, row=4)
+    metabase = _FakeMetabase(existing=[_ref(10, 5, _OWNED), foreign_card, foreign_text])
+    _wire(monkeypatch, _FakeProvider(), metabase)
+    cli.main(["metabase", "forecast-dashboard", "--viewer", "marilene_rousseau", "--replace"])
+    assert [value for kind, value in metabase.calls if kind == "delete"] == [5]
+    kept = [item for item in metabase.layout if item.dashcard_id is not None]
+    assert [(item.dashcard_id, item.card_id) for item in kept] == [(11, 77), (12, None)]
+    # Re-placed below the six new cards (rows 0-19), keeping their relative order.
+    assert [item.row for item in kept] == [20, 24]
+    assert "kept 2 other cards" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("reject_card, layout_ok, rolled_back", [
+    (3, True, [101, 102]),
+    (None, False, [101, 102, 103, 104, 105, 106]),
+])
+def test_cli_rolls_back_created_cards_on_failure(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+    reject_card: int | None, layout_ok: bool, rolled_back: list[int],
+) -> None:
+    metabase = _FakeMetabase(existing=[_ref(1, 1, _OWNED)], reject_card=reject_card, layout_ok=layout_ok)
+    _wire(monkeypatch, _FakeProvider(), metabase)
+    with pytest.raises(SystemExit):
+        cli.main(["metabase", "forecast-dashboard", "--viewer", "marilene_rousseau", "--replace"])
+    # Only the cards of this run are removed; the dashboard's own cards stay.
+    assert [value for kind, value in metabase.calls if kind == "delete"] == rolled_back
+    assert f"removed the {len(rolled_back)} cards created by this run" in capsys.readouterr().err
 
 
 def test_get_or_create_dashboard_lists_collection_items() -> None:

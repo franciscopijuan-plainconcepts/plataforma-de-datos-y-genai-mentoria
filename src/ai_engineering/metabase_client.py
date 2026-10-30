@@ -31,6 +31,7 @@ from src.contracts.metabase import (
     Card,
     Collection,
     Dashboard,
+    DashboardCardRef,
     DashboardItem,
     DashcardPlacement,
     MetabaseConfig,
@@ -488,17 +489,35 @@ class MetabaseClient:
             )
             return None
 
-    def get_dashboard_card_ids(self, dashboard_id: int) -> list[int] | None:
-        """GET /api/dashboard/{id}: ids of the cards placed on it (None on failure)."""
+    def get_dashboard_cards(self, dashboard_id: int) -> list[DashboardCardRef] | None:
+        """GET /api/dashboard/{id}: its dashcards with layout and card description.
+
+        Returns None on failure (HTTP error or an unexpected payload).
+        """
         try:
             response = self._request_with_reauth("GET", f"/api/dashboard/{dashboard_id}")
             response.raise_for_status()
             data = response.json()
-        except httpx.HTTPError as exc:
-            _logger.warning("Metabase get_dashboard_card_ids(%s) failed: %s", dashboard_id, exc)
+            dashcards = data.get("dashcards", data.get("ordered_cards", []))
+            return [
+                DashboardCardRef(
+                    placement=DashcardPlacement(
+                        card_id=item.get("card_id"),
+                        row=int(item.get("row", 0)),
+                        col=int(item.get("col", 0)),
+                        size_x=int(item.get("size_x", 4)),
+                        size_y=int(item.get("size_y", 4)),
+                        dashcard_id=int(item["id"]),
+                        visualization_settings=item.get("visualization_settings") or {},
+                        parameter_mappings=item.get("parameter_mappings") or [],
+                    ),
+                    description=(item.get("card") or {}).get("description"),
+                )
+                for item in dashcards
+            ]
+        except (httpx.HTTPError, KeyError, TypeError, ValueError) as exc:
+            _logger.warning("Metabase get_dashboard_cards(%s) failed: %s", dashboard_id, exc)
             return None
-        dashcards = data.get("dashcards", data.get("ordered_cards", []))
-        return [int(item["card_id"]) for item in dashcards if item.get("card_id") is not None]
 
     def set_dashboard_cards(
         self, dashboard_id: int, placements: list[DashcardPlacement]
@@ -506,19 +525,20 @@ class MetabaseClient:
         """PUT /api/dashboard/{id} with the full dashcard layout (v3.3).
 
         Metabase >= 0.47 replaces the dashboard's cards with this list;
-        negative ids mark new dashcards. Returns True on success.
+        negative ids mark new dashcards, a placement with `dashcard_id` keeps
+        that existing dashcard. Returns True on success.
         """
         body: dict[str, object] = {
             "dashcards": [
                 {
-                    "id": -(index + 1),
+                    "id": placement.dashcard_id if placement.dashcard_id is not None else -(index + 1),
                     "card_id": placement.card_id,
                     "row": placement.row,
                     "col": placement.col,
                     "size_x": placement.size_x,
                     "size_y": placement.size_y,
-                    "parameter_mappings": [],
-                    "visualization_settings": {},
+                    "parameter_mappings": placement.parameter_mappings,
+                    "visualization_settings": placement.visualization_settings,
                 }
                 for index, placement in enumerate(placements)
             ],

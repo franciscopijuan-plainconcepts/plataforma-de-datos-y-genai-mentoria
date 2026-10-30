@@ -169,6 +169,14 @@ def _info(msg: str) -> None:
     print(msg)
 
 
+def _forecast_extra_tables() -> dict[str, TableDef]:
+    """Warehouse datasets queryable next to Orders (`Predictions`, `Forecast
+    Accuracy`), keyed by lowercase name as the SQL validator/RLS look them up."""
+    from src.mlops.predictions_store import forecast_semantic_tables
+
+    return {name.lower(): table_def for name, table_def in forecast_semantic_tables().items()}
+
+
 def _load_semantic_context() -> tuple["DataDictionaryDocument", TableDef, "SemanticLayerDocument", str]:
     from src.data_engineering.semantic_layer.ossie import import_ossie, read_ossie_document
     from src.mlops.predictions_store import forecast_semantic_tables
@@ -698,12 +706,7 @@ def _compose_ask_pipeline(
     # advertise its schema — `ask` will just return 0 rows, which is fine.
     # v3.3: the `Forecast Accuracy` backtest view is queryable the same way
     # (single table, own Region column -> same RLS), for model-error questions.
-    from src.mlops.predictions_store import forecast_accuracy_view_def, predictions_table_def
-
-    extra_tables = {
-        "predictions": predictions_table_def(),
-        "forecast accuracy": forecast_accuracy_view_def(),
-    }
+    extra_tables = _forecast_extra_tables()
 
     llm_client = LlmClient(llm_config)
 
@@ -1417,7 +1420,6 @@ def cmd_metabase_forecast_dashboard(viewer_id: str, environment: str, replace: b
     from src.contracts.metabase import DashcardPlacement, MetabaseConfig
     from src.data_engineering.semantic_layer.governed_provider import build_governed_provider
     from src.data_engineering.semantic_layer.resolver import SemanticQueryResolver
-    from src.mlops.predictions_store import forecast_accuracy_view_def, predictions_table_def
     from src.mlops.registry import ArtifactRegistry
     from src.reporting.forecast_dashboard import build_forecast_cards
 
@@ -1437,24 +1439,8 @@ def cmd_metabase_forecast_dashboard(viewer_id: str, environment: str, replace: b
 
     config = PostgresConfig.from_env()
     viewer = _resolve_viewer(viewer_id, False, config)
-    extra_tables = {
-        "predictions": predictions_table_def(),
-        "forecast accuracy": forecast_accuracy_view_def(),
-    }
-    with PostgresRepository(config=config) as repo:
-        provider = build_governed_provider(
-            delegate=repo, resolver=SemanticQueryResolver(), viewer=viewer, table_def=orders_def,
-            provenance=semantic_doc.provenance, extra_tables=extra_tables,
-        )
-        prepared = []
-        for spec in specs:
-            try:
-                query = provider.prepare_query(spec.sql, orders_def)
-                provider.execute_prepared_query(query, orders_def)
-            except Exception as exc:
-                _err(f"Card {spec.key!r} failed governed execution, nothing published: {exc}")
-            prepared.append(query)
 
+    # Idempotency first: an existing dashboard is skipped before running any query.
     try:
         mb_config = MetabaseConfig.from_env()
     except ValueError as exc:
@@ -1463,7 +1449,7 @@ def cmd_metabase_forecast_dashboard(viewer_id: str, environment: str, replace: b
     dashboard = client.get_or_create_dashboard(f"Forecast: {viewer.viewer_id}", state.collection_id)
     if dashboard is None:
         _err("Could not find or create the forecast dashboard in Metabase.")
-    existing = client.get_dashboard_card_ids(dashboard.id)
+    existing = client.get_dashboard_cards(dashboard.id)
     if existing is None:
         _err(f"Could not read dashboard {dashboard.id} from Metabase.")
     if existing and not replace:
@@ -1471,13 +1457,44 @@ def cmd_metabase_forecast_dashboard(viewer_id: str, environment: str, replace: b
               "skipped (use --replace to rebuild it).")
         return
 
+    with PostgresRepository(config=config) as repo:
+        provider = build_governed_provider(
+            delegate=repo, resolver=SemanticQueryResolver(), viewer=viewer, table_def=orders_def,
+            provenance=semantic_doc.provenance, extra_tables=_forecast_extra_tables(),
+        )
+        prepared = []
+        for spec in specs:
+            try:
+                query = provider.prepare_query(spec.sql, orders_def)
+                provider.execute_prepared_query(query, orders_def)
+            except Exception as exc:
+                _err(f"Card {spec.key!r} failed governed execution, no cards published: {exc}")
+            prepared.append(query)
+
+    # --replace only ever deletes the cards this command created (marked
+    # `source=forecast-dashboard` in their description). Anything else a
+    # user put on the dashboard is kept: the PUT replaces the whole layout,
+    # so those dashcards are re-sent (same id/settings) below the new grid.
+    marker = "source=forecast-dashboard"
+    owned = [ref for ref in existing if marker in (ref.description or "").split()]
+    foreign = [ref.placement for ref in existing if ref not in owned]
+
+    gov_bypass = bool(viewer.allows_full_access and viewer.is_local_dev)
     created_at = datetime.now(timezone.utc).isoformat()
+    created: list[int] = []
+
+    def rollback(reason: str) -> NoReturn:
+        leftover = [card_id for card_id in created if not client.delete_card(card_id)]
+        detail = f" (could not delete cards {leftover}; remove them by hand)" if leftover else ""
+        _err(f"{reason}; removed the {len(created) - len(leftover)} cards created by this run{detail}, "
+             f"dashboard {dashboard.id} left unchanged.")
+
     placements: list[DashcardPlacement] = []
     for spec, query in zip(specs, prepared):
         description = (
-            f"viewer_id={viewer.viewer_id} gov_bypass=False regions={list(viewer.regions)!r} "
+            f"viewer_id={viewer.viewer_id} gov_bypass={gov_bypass} regions={list(viewer.regions)!r} "
             f"model_sha256={query.model_sha256} run_id={active.run_id} env={environment} "
-            f"source=forecast-dashboard created_at={created_at}"
+            f"{marker} created_at={created_at}"
         )
         card = client.create_card(
             name=spec.name, sql=query.sql, collection_id=state.collection_id, display=spec.display,
@@ -1485,16 +1502,23 @@ def cmd_metabase_forecast_dashboard(viewer_id: str, environment: str, replace: b
             visualization_settings=spec.visualization_settings,
         )
         if card is None:
-            _err(f"Metabase rejected card {spec.key!r}; dashboard left unchanged.")
+            rollback(f"Metabase rejected card {spec.key!r}")
+        created.append(card.id)
         placements.append(DashcardPlacement(
             card_id=card.id, row=spec.row, col=spec.col, size_x=spec.size_x, size_y=spec.size_y,
         ))
+    if foreign:
+        offset = max(spec.row + spec.size_y for spec in specs) - min(item.row for item in foreign)
+        placements += [item.model_copy(update={"row": item.row + offset}) for item in foreign]
     if not client.set_dashboard_cards(dashboard.id, placements):
-        _err(f"Cards created but the layout of dashboard {dashboard.id} could not be saved.")
-    for card_id in existing:
-        client.delete_card(card_id)
+        rollback(f"The layout of dashboard {dashboard.id} could not be saved")
+    stale = sorted({ref.placement.card_id for ref in owned if ref.placement.card_id is not None})
+    undeleted = [card_id for card_id in stale if not client.delete_card(card_id)]
+    if undeleted:
+        _info(f"WARNING: could not delete previous forecast cards {undeleted} (no longer on the dashboard).")
 
-    print(f"Forecast dashboard {dashboard.name!r} (id={dashboard.id}) with {len(placements)} cards "
+    kept = f", kept {len(foreign)} other cards" if foreign else ""
+    print(f"Forecast dashboard {dashboard.name!r} (id={dashboard.id}) with {len(specs)} cards{kept} "
           f"for viewer={viewer.viewer_id} regions={list(viewer.regions)} run_id={active.run_id} env={environment}.")
     print(f"Open: {mb_config.host.rstrip('/')}/dashboard/{dashboard.id}")
 
