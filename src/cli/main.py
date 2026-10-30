@@ -575,9 +575,14 @@ def cmd_ask(
             print(f"Execution error: {response.query_result.error}")
             print(f"  SQL: {response.query_result.sql}")
         else:
+            rows = response.query_result.rows
             print(f"Rows ({response.query_result.row_count}):")
-            for row in response.query_result.rows:
-                print(f"  {row.data}")
+            if all(not row.data for row in rows):
+                # The adapter drops NULL values, so an empty aggregate prints `{}`.
+                print("  (no data for this question in the viewer's scope)")
+            else:
+                for row in rows:
+                    print(f"  {row.data}")
             print(f"Latency: {response.query_result.latency_ms}ms")
 
 
@@ -646,19 +651,22 @@ def _resolve_viewer(
                     f"regions={list(viewer.regions)} "
                     f"allows_full_access={viewer.allows_full_access}"
                 )
-            except FileNotFoundError as exc:
-                _err(str(exc))
-            except ValueError as exc:
-                # No match in People nor viewers.yaml — list both sources.
+            except (FileNotFoundError, ValueError) as exc:
+                # No match in People nor viewers.yaml (or no viewers.yaml at
+                # all, the usual case): the person is unknown — say so and list
+                # the real people instead of only reporting the missing file.
                 try:
                     available_people = people_resolver.list_available()
                 except Exception:
                     available_people = []
+                hint = (
+                    "No viewers.yaml exists for escape-hatch viewers (copy viewers.example.yaml)."
+                    if isinstance(exc, FileNotFoundError)
+                    else "Configure custom viewers in viewers.yaml (see viewers.example.yaml)."
+                )
                 _err(
-                    f"Viewer {viewer_id!r} not found. "
-                    f"People available: {available_people}. "
-                    f"Configure custom viewers in viewers.yaml (see "
-                    "viewers.example.yaml)."
+                    f"Viewer {viewer_id!r} not found in People. "
+                    f"People available: {available_people}. {hint}"
                 )
     elif allow_full_access:
         # `--allow-full-access` without --viewer: build an ad-hoc full-access viewer.
