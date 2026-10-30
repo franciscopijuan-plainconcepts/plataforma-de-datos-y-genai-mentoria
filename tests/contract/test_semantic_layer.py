@@ -67,8 +67,9 @@ def test_metric_name_must_be_snake_case() -> None:
 
 
 def test_all_canonical_metrics_present() -> None:
-    """FR-003: exactly eight canonical metrics are loaded from Ossie."""
-    names = {m.name for m in _load_test_semantic_layer().metrics}
+    """FR-003: exactly eight canonical Orders metrics are loaded from Ossie
+    (v3.3 forecast metrics live on Predictions / Forecast Accuracy)."""
+    names = {m.name for m in _load_test_semantic_layer().metrics if m.source_table == "Orders"}
     expected = {
         "gross_sales",
         "returned_amount",
@@ -101,10 +102,10 @@ def test_viewer_id_must_be_snake_case() -> None:
 def test_canonical_document_builds() -> None:
     """Sanity: the canonical content satisfies the document schema."""
     doc = _load_test_semantic_layer()
-    assert len(doc.metrics) == 8
+    assert len(doc.metrics) == 15
     assert len(doc.dimensions) >= 11
     assert len(doc.relationships) == 2
-    assert len(doc.tables) == 3
+    assert len(doc.tables) == 5
     # Provenance hashes recorded.
     assert doc.source_sha256 and doc.semantic_source_sha256
 

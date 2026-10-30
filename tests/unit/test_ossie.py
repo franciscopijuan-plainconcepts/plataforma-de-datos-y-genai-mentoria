@@ -28,7 +28,13 @@ def dictionary() -> DataDictionaryDocument:
 
 @pytest.fixture()
 def layer(dictionary: DataDictionaryDocument) -> SemanticLayerDocument:
-    return _load_test_semantic_layer(dictionary)
+    """Workbook-only projection: the generic boundary tests predate warehouse datasets."""
+    canonical = _load_test_semantic_layer(dictionary)
+    workbook = {table.name for table in dictionary.tables}
+    return canonical.model_copy(update={
+        "tables": [table for table in canonical.tables if table.name in workbook],
+        "metrics": [metric for metric in canonical.metrics if metric.source_table == "Orders"],
+    })
 
 
 @pytest.fixture()

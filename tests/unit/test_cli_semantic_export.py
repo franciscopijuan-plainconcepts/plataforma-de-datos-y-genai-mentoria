@@ -8,6 +8,7 @@ import pytest
 
 from src.cli import main as cli
 from src.data_engineering.semantic_layer.ossie import canonicalize_ossie, import_ossie
+from src.mlops.predictions_store import forecast_semantic_tables
 from tests.semantic_fixtures import _build_test_dictionary, _build_test_table_defs, _canonical_model_text
 
 
@@ -43,7 +44,8 @@ def test_explicit_export_keeps_consumption_derivatives(
     assert model.read_bytes() == model_bytes
     before = legacy_json.read_bytes()
     cli.main(["generate-semantic-layer", "--export-ossie", str(candidate)])
-    assert len(import_ossie(candidate.read_text(), dictionary).metrics) == 8
+    exported = import_ossie(candidate.read_text(), dictionary, forecast_semantic_tables())
+    assert exported.metrics == import_ossie(model.read_text(), dictionary, forecast_semantic_tables()).metrics
     copied = json.loads(canonicalize_ossie(candidate.read_text()))
     assert opaque in copied["custom_extensions"]
     assert opaque in copied["datasets"][0]["fields"][0]["custom_extensions"]

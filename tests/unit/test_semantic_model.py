@@ -19,10 +19,26 @@ def document() -> SemanticLayerDocument:
 
 
 def test_canonical_metrics(document: SemanticLayerDocument) -> None:
-    assert {metric.name for metric in document.metrics} == {
-        "gross_sales", "returned_amount", "net_sales", "return_rate",
-        "total_profit", "net_profit", "avg_order_value", "order_count",
+    assert {metric.name: metric.source_table for metric in document.metrics} == {
+        "gross_sales": "Orders", "returned_amount": "Orders", "net_sales": "Orders",
+        "return_rate": "Orders", "total_profit": "Orders", "net_profit": "Orders",
+        "avg_order_value": "Orders", "order_count": "Orders",
+        # v3.3: forecast + backtest accuracy (proposed by the doc -> Ossie agent).
+        "predicted_sales": "Predictions", "avg_predicted_line_sales": "Predictions",
+        "backtest_actual_sales": "Forecast Accuracy", "backtest_predicted_sales": "Forecast Accuracy",
+        "forecast_abs_error": "Forecast Accuracy", "forecast_wape": "Forecast Accuracy",
+        "forecast_bias": "Forecast Accuracy",
     }
+
+
+def test_canonical_forecast_datasets(document: SemanticLayerDocument) -> None:
+    assert {table.name for table in document.tables} == {
+        "Orders", "Returns", "People", "Predictions", "Forecast Accuracy",
+    }
+    wape = next(metric for metric in document.metrics if metric.name == "forecast_wape")
+    assert wape.formula_sql == 'SUM("Abs Error") / NULLIF(SUM("Actual Sales"), 0)'
+    assert wape.aggregation == "RATIO"
+    assert wape.derives_from == ["forecast_abs_error", "backtest_actual_sales"]
 
 
 def test_canonical_dimensions(document: SemanticLayerDocument) -> None:

@@ -1,6 +1,107 @@
 version: 0.2.0.dev0
 name: sales
 datasets:
+- name: Forecast Accuracy
+  source: '"Forecast Accuracy"'
+  description: 'Backtest accuracy of each model run: per month, Region and Category
+    of the run''s out-of-sample chronological holdout, actual vs predicted Sales of
+    the same historical order lines and the absolute error of the monthly total. Base
+    of forecast drift monitoring.'
+  fields:
+  - name: abs_error
+    expression:
+      dialects:
+      - dialect: ANSI_SQL
+        expression: '"Abs Error"'
+    description: Absolute difference between predicted and actual monthly Sales.
+    custom_extensions:
+    - vendor_name: PLATAFORMA_DATOS_GENAI
+      data: '{"dimension_type":null,"physical_column":"Abs Error","profile_version":1}'
+  - name: actual_sales
+    expression:
+      dialects:
+      - dialect: ANSI_SQL
+        expression: '"Actual Sales"'
+    description: Actual Sales of the evaluated order lines (sum for the month).
+    custom_extensions:
+    - vendor_name: PLATAFORMA_DATOS_GENAI
+      data: '{"dimension_type":null,"physical_column":"Actual Sales","profile_version":1}'
+  - name: category
+    expression:
+      dialects:
+      - dialect: ANSI_SQL
+        expression: '"Category"'
+    description: Product category of the evaluated order lines.
+    custom_extensions:
+    - vendor_name: PLATAFORMA_DATOS_GENAI
+      data: '{"dimension_type":null,"physical_column":"Category","profile_version":1}'
+  - name: line_count
+    expression:
+      dialects:
+      - dialect: ANSI_SQL
+        expression: '"Line Count"'
+    description: Number of historical order lines evaluated.
+    custom_extensions:
+    - vendor_name: PLATAFORMA_DATOS_GENAI
+      data: '{"dimension_type":null,"physical_column":"Line Count","profile_version":1}'
+  - name: model_name
+    expression:
+      dialects:
+      - dialect: ANSI_SQL
+        expression: '"Model Name"'
+    description: Model family of the run (linear_regression or catboost).
+    custom_extensions:
+    - vendor_name: PLATAFORMA_DATOS_GENAI
+      data: '{"dimension_type":null,"physical_column":"Model Name","profile_version":1}'
+  - name: month
+    expression:
+      dialects:
+      - dialect: ANSI_SQL
+        expression: '"Month"'
+    description: First day of the holdout month being evaluated.
+    custom_extensions:
+    - vendor_name: PLATAFORMA_DATOS_GENAI
+      data: '{"dimension_type":null,"physical_column":"Month","profile_version":1}'
+  - name: predicted_sales
+    expression:
+      dialects:
+      - dialect: ANSI_SQL
+        expression: '"Predicted Sales"'
+    description: Sales the run predicted for the same order lines (sum for the month).
+    custom_extensions:
+    - vendor_name: PLATAFORMA_DATOS_GENAI
+      data: '{"dimension_type":null,"physical_column":"Predicted Sales","profile_version":1}'
+  - name: region
+    expression:
+      dialects:
+      - dialect: ANSI_SQL
+        expression: '"Region"'
+    description: Region of the evaluated order lines; basis for RLS like Orders.Region.
+    custom_extensions:
+    - vendor_name: PLATAFORMA_DATOS_GENAI
+      data: '{"dimension_type":null,"physical_column":"Region","profile_version":1}'
+  - name: run_id
+    expression:
+      dialects:
+      - dialect: ANSI_SQL
+        expression: '"Run ID"'
+    description: Registry run that was backtested.
+    custom_extensions:
+    - vendor_name: PLATAFORMA_DATOS_GENAI
+      data: '{"dimension_type":null,"physical_column":"Run ID","profile_version":1}'
+  - name: trained_at
+    expression:
+      dialects:
+      - dialect: ANSI_SQL
+        expression: '"Trained At"'
+    description: When the run was trained; the latest value identifies the newest
+      run.
+    custom_extensions:
+    - vendor_name: PLATAFORMA_DATOS_GENAI
+      data: '{"dimension_type":null,"physical_column":"Trained At","profile_version":1}'
+  custom_extensions:
+  - vendor_name: PLATAFORMA_DATOS_GENAI
+    data: '{"profile_version":1,"table_type":"fact"}'
 - name: Orders
   source: '"Orders"'
   primary_key:
@@ -291,6 +392,181 @@ datasets:
   custom_extensions:
   - vendor_name: PLATAFORMA_DATOS_GENAI
     data: '{"profile_version":1,"table_type":"governance_mapping"}'
+- name: Predictions
+  source: '"Predictions"'
+  primary_key:
+  - prediction_id
+  description: 'Forecast history of the sales model: one row per prediction of a single
+    representative order line (batch forecasts seeded for upcoming months plus ad-hoc
+    predict-sales calls), with the model run that served it and every input used.
+    Predicted Sales is per order line, not a monthly total.'
+  fields:
+  - name: category
+    expression:
+      dialects:
+      - dialect: ANSI_SQL
+        expression: '"Category"'
+    description: Product category used as model input.
+    custom_extensions:
+    - vendor_name: PLATAFORMA_DATOS_GENAI
+      data: '{"dimension_type":null,"physical_column":"Category","profile_version":1}'
+  - name: discount
+    expression:
+      dialects:
+      - dialect: ANSI_SQL
+        expression: '"Discount"'
+    description: Discount used as model input (the model only uses whether it is non-zero).
+    custom_extensions:
+    - vendor_name: PLATAFORMA_DATOS_GENAI
+      data: '{"dimension_type":null,"physical_column":"Discount","profile_version":1}'
+  - name: environment
+    expression:
+      dialects:
+      - dialect: ANSI_SQL
+        expression: '"Environment"'
+    description: Environment whose promoted model served the prediction (dev, staging,
+      prod).
+    custom_extensions:
+    - vendor_name: PLATAFORMA_DATOS_GENAI
+      data: '{"dimension_type":null,"physical_column":"Environment","profile_version":1}'
+  - name: latency_ms
+    expression:
+      dialects:
+      - dialect: ANSI_SQL
+        expression: '"Latency Ms"'
+    description: Inference latency in milliseconds.
+    custom_extensions:
+    - vendor_name: PLATAFORMA_DATOS_GENAI
+      data: '{"dimension_type":null,"physical_column":"Latency Ms","profile_version":1}'
+  - name: market
+    expression:
+      dialects:
+      - dialect: ANSI_SQL
+        expression: '"Market"'
+    description: Market used as model input.
+    custom_extensions:
+    - vendor_name: PLATAFORMA_DATOS_GENAI
+      data: '{"dimension_type":null,"physical_column":"Market","profile_version":1}'
+  - name: model_name
+    expression:
+      dialects:
+      - dialect: ANSI_SQL
+        expression: '"Model Name"'
+    description: Model family of the run (linear_regression or catboost).
+    custom_extensions:
+    - vendor_name: PLATAFORMA_DATOS_GENAI
+      data: '{"dimension_type":null,"physical_column":"Model Name","profile_version":1}'
+  - name: order_date
+    expression:
+      dialects:
+      - dialect: ANSI_SQL
+        expression: '"Order Date"'
+    description: Order date being forecast (first day of the month for seeded forecasts).
+    custom_extensions:
+    - vendor_name: PLATAFORMA_DATOS_GENAI
+      data: '{"dimension_type":null,"physical_column":"Order Date","profile_version":1}'
+  - name: predicted_at
+    expression:
+      dialects:
+      - dialect: ANSI_SQL
+        expression: '"Predicted At"'
+    description: Timestamp (UTC) when the prediction was made.
+    custom_extensions:
+    - vendor_name: PLATAFORMA_DATOS_GENAI
+      data: '{"dimension_type":null,"physical_column":"Predicted At","profile_version":1}'
+  - name: predicted_sales
+    expression:
+      dialects:
+      - dialect: ANSI_SQL
+        expression: '"Predicted Sales"'
+    description: Sales predicted by the model for one order line with these inputs.
+    custom_extensions:
+    - vendor_name: PLATAFORMA_DATOS_GENAI
+      data: '{"dimension_type":null,"physical_column":"Predicted Sales","profile_version":1}'
+  - name: prediction_id
+    expression:
+      dialects:
+      - dialect: ANSI_SQL
+        expression: '"Prediction ID"'
+    description: Surrogate UUID of the prediction event. Primary key.
+    custom_extensions:
+    - vendor_name: PLATAFORMA_DATOS_GENAI
+      data: '{"dimension_type":null,"physical_column":"Prediction ID","profile_version":1}'
+  - name: product_id
+    expression:
+      dialects:
+      - dialect: ANSI_SQL
+        expression: '"Product ID"'
+    description: Product identifier used as model input.
+    custom_extensions:
+    - vendor_name: PLATAFORMA_DATOS_GENAI
+      data: '{"dimension_type":null,"physical_column":"Product ID","profile_version":1}'
+  - name: quantity
+    expression:
+      dialects:
+      - dialect: ANSI_SQL
+        expression: '"Quantity"'
+    description: Units ordered used as model input.
+    custom_extensions:
+    - vendor_name: PLATAFORMA_DATOS_GENAI
+      data: '{"dimension_type":null,"physical_column":"Quantity","profile_version":1}'
+  - name: region
+    expression:
+      dialects:
+      - dialect: ANSI_SQL
+        expression: '"Region"'
+    description: Region used as model input; basis for RLS like Orders.Region.
+    custom_extensions:
+    - vendor_name: PLATAFORMA_DATOS_GENAI
+      data: '{"dimension_type":null,"physical_column":"Region","profile_version":1}'
+  - name: run_id
+    expression:
+      dialects:
+      - dialect: ANSI_SQL
+        expression: '"Run ID"'
+    description: Registry run of the promoted model that served the prediction.
+    custom_extensions:
+    - vendor_name: PLATAFORMA_DATOS_GENAI
+      data: '{"dimension_type":null,"physical_column":"Run ID","profile_version":1}'
+  - name: segment
+    expression:
+      dialects:
+      - dialect: ANSI_SQL
+        expression: '"Segment"'
+    description: Customer segment used as model input.
+    custom_extensions:
+    - vendor_name: PLATAFORMA_DATOS_GENAI
+      data: '{"dimension_type":null,"physical_column":"Segment","profile_version":1}'
+  - name: ship_mode
+    expression:
+      dialects:
+      - dialect: ANSI_SQL
+        expression: '"Ship Mode"'
+    description: Shipping class used as model input.
+    custom_extensions:
+    - vendor_name: PLATAFORMA_DATOS_GENAI
+      data: '{"dimension_type":null,"physical_column":"Ship Mode","profile_version":1}'
+  - name: sub_category
+    expression:
+      dialects:
+      - dialect: ANSI_SQL
+        expression: '"Sub-Category"'
+    description: Product sub-category used as model input.
+    custom_extensions:
+    - vendor_name: PLATAFORMA_DATOS_GENAI
+      data: '{"dimension_type":null,"physical_column":"Sub-Category","profile_version":1}'
+  - name: used_fallback_encoding
+    expression:
+      dialects:
+      - dialect: ANSI_SQL
+        expression: '"Used Fallback Encoding"'
+    description: True when an input category was unseen in training.
+    custom_extensions:
+    - vendor_name: PLATAFORMA_DATOS_GENAI
+      data: '{"dimension_type":null,"physical_column":"Used Fallback Encoding","profile_version":1}'
+  custom_extensions:
+  - vendor_name: PLATAFORMA_DATOS_GENAI
+    data: '{"profile_version":1,"table_type":"fact"}'
 - name: Returns
   source: '"Returns"'
   primary_key:
@@ -354,6 +630,79 @@ metrics:
   custom_extensions:
   - vendor_name: PLATAFORMA_DATOS_GENAI
     data: '{"aggregation":"EXPRESSION","assumption":null,"derives_from":["gross_sales"],"execution_dialect":"postgres","portability":"platform-profile","profile_version":1,"source_table":"Orders","uses_returns":false}'
+- name: avg_predicted_line_sales
+  expression:
+    dialects:
+    - dialect: ANSI_SQL
+      expression: AVG("Predicted Sales")
+  description: Average predicted sales value per prediction line.
+  custom_extensions:
+  - vendor_name: PLATAFORMA_DATOS_GENAI
+    data: '{"aggregation":"AVG","assumption":"Each prediction row corresponds to a
+      representative order line; the average is computed over all prediction rows
+      in scope.","derives_from":[],"execution_dialect":"postgres","portability":"platform-profile","profile_version":1,"source_table":"Predictions","uses_returns":false}'
+- name: backtest_actual_sales
+  expression:
+    dialects:
+    - dialect: ANSI_SQL
+      expression: SUM("Actual Sales")
+  description: Total actual sales evaluated during backtest holdout periods.
+  custom_extensions:
+  - vendor_name: PLATAFORMA_DATOS_GENAI
+    data: '{"aggregation":"SUM","assumption":"Actual Sales in Forecast Accuracy represents
+      real sales for holdout months; filtering by Run ID is required to evaluate a
+      specific model.","derives_from":[],"execution_dialect":"postgres","portability":"platform-profile","profile_version":1,"source_table":"Forecast
+      Accuracy","uses_returns":false}'
+- name: backtest_predicted_sales
+  expression:
+    dialects:
+    - dialect: ANSI_SQL
+      expression: SUM("Predicted Sales")
+  description: Total predicted sales for the same lines evaluated during backtest
+    holdout periods.
+  custom_extensions:
+  - vendor_name: PLATAFORMA_DATOS_GENAI
+    data: '{"aggregation":"SUM","assumption":"Predicted Sales in Forecast Accuracy
+      corresponds to the same lines as Actual Sales for comparison.","derives_from":[],"execution_dialect":"postgres","portability":"platform-profile","profile_version":1,"source_table":"Forecast
+      Accuracy","uses_returns":false}'
+- name: forecast_abs_error
+  expression:
+    dialects:
+    - dialect: ANSI_SQL
+      expression: SUM("Abs Error")
+  description: Total absolute error between predicted and actual sales across holdout
+    months.
+  custom_extensions:
+  - vendor_name: PLATAFORMA_DATOS_GENAI
+    data: '{"aggregation":"SUM","assumption":"Abs Error is the monthly absolute error
+      already computed in the Forecast Accuracy view.","derives_from":[],"execution_dialect":"postgres","portability":"platform-profile","profile_version":1,"source_table":"Forecast
+      Accuracy","uses_returns":false}'
+- name: forecast_bias
+  expression:
+    dialects:
+    - dialect: ANSI_SQL
+      expression: (SUM("Predicted Sales") - SUM("Actual Sales")) / NULLIF(SUM("Actual
+        Sales"), 0)
+  description: 'Forecast bias: (predicted sales - actual sales) / actual sales. Positive
+    means overestimation, negative means underestimation.'
+  custom_extensions:
+  - vendor_name: PLATAFORMA_DATOS_GENAI
+    data: '{"aggregation":"EXPRESSION","assumption":"Bias is computed as the difference
+      between total predicted and actual sales, normalized by actual sales.","derives_from":["backtest_predicted_sales","backtest_actual_sales"],"execution_dialect":"postgres","portability":"platform-profile","profile_version":1,"source_table":"Forecast
+      Accuracy","uses_returns":false}'
+- name: forecast_wape
+  expression:
+    dialects:
+    - dialect: ANSI_SQL
+      expression: SUM("Abs Error") / NULLIF(SUM("Actual Sales"), 0)
+  description: 'Weighted Absolute Percentage Error: total absolute error divided by
+    total actual sales.'
+  custom_extensions:
+  - vendor_name: PLATAFORMA_DATOS_GENAI
+    data: '{"aggregation":"RATIO","assumption":"WAPE is computed as the ratio of total
+      absolute error to total actual sales across the selected holdout period; an
+      increase between runs indicates model degradation.","derives_from":["forecast_abs_error","backtest_actual_sales"],"execution_dialect":"postgres","portability":"platform-profile","profile_version":1,"source_table":"Forecast
+      Accuracy","uses_returns":false}'
 - name: gross_sales
   expression:
     dialects:
@@ -398,6 +747,18 @@ metrics:
   custom_extensions:
   - vendor_name: PLATAFORMA_DATOS_GENAI
     data: '{"aggregation":"COUNT_DISTINCT","assumption":null,"derives_from":[],"execution_dialect":"postgres","portability":"platform-profile","profile_version":1,"source_table":"Orders","uses_returns":false}'
+- name: predicted_sales
+  expression:
+    dialects:
+    - dialect: ANSI_SQL
+      expression: SUM("Predicted Sales")
+  description: Sum of per-line predicted Sales across forecast rows; compares months
+    or regions within one run, not a monthly sales total.
+  custom_extensions:
+  - vendor_name: PLATAFORMA_DATOS_GENAI
+    data: '{"aggregation":"SUM","assumption":"Each row in Predictions represents one
+      prediction for a representative order line; filtering by Environment=''prod''
+      and latest Run ID must be applied at query time to obtain the vigente forecast.","derives_from":[],"execution_dialect":"postgres","portability":"platform-profile","profile_version":1,"source_table":"Predictions","uses_returns":false}'
 - name: return_rate
   expression:
     dialects:
@@ -446,4 +807,4 @@ custom_extensions:
     instead of JOIN to avoid inflating rows.","net_profit: Proportionally discounts
     total_profit by the fraction of sales that was returned (returned_amount / gross_sales
     * total_profit). Assumes returned lines have no independent profit record; a more
-    precise subquery-based formula is documented for v3.0+."],"content_version":"1.0.0","profile_version":1,"required_profile":"PLATAFORMA_DATOS_GENAI","semantic_source_sha256":"e40350ee0d0b56a3b8c0cf0323650ee6217c83a530e5045dfc9ea429fddd0bba","source_sha256":"d7a805f6cfd26339f478a3de6a6f128ea156179be093e09a1f528776fd5fdc3e"}'
+    precise subquery-based formula is documented for v3.0+."],"content_version":"1.1.0","profile_version":1,"required_profile":"PLATAFORMA_DATOS_GENAI","semantic_source_sha256":"e40350ee0d0b56a3b8c0cf0323650ee6217c83a530e5045dfc9ea429fddd0bba","source_sha256":"d7a805f6cfd26339f478a3de6a6f128ea156179be093e09a1f528776fd5fdc3e"}'
