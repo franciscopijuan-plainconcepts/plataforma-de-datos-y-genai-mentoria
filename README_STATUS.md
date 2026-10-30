@@ -126,7 +126,7 @@ pendientes del commit/push/PR del usuario.
   - El forecast va con el reloj real y Orders termina en 2017, así que "el mes real que llega" se simula con el holdout cronológico del run activo, que el modelo nunca vio al entrenar.
   - Cada línea del holdout se puntúa y se guarda en `Forecast Backtest`. La view `Forecast Accuracy` la agrega por mes × Region × Category.
   - Es idempotente por `Run ID`, así que cada reentrenamiento añade su historial. Esa es la base del drift monitoring.
-- **Dashboard predictivo (`metabase forecast-dashboard --viewer <id>`).** Tiene 6 cards construidas desde las métricas Ossie, con SQL gobernado por RLS y ejecutado antes de publicar. `--replace` permite reconstruirlo.
+- **Dashboard predictivo (`metabase forecast-dashboard --viewer <id>`).** Tiene 6 cards construidas desde las métricas Ossie, con SQL gobernado por RLS y ejecutado antes de publicar. `--replace` permite reconstruirlo y solo borra las cards que creó el propio comando. Las cards fijan el `run_id` activo y filtran por `CURRENT_DATE`: tras promocionar otro run, o pasados los meses sembrados, hay que resembrar y relanzarlo con `--replace`.
 
 ## Calidad tecnica actual
 

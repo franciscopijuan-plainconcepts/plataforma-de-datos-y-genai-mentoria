@@ -106,11 +106,14 @@ This platform lets you:
 - **Predictive dashboard (`metabase forecast-dashboard --viewer <id>`).**
   - Six cards built from the Ossie metrics by name: next-month forecast, WAPE, bias, monthly sales history, forecast for the next months, and backtest predicted vs actual by month.
   - Every SQL goes through the `GovernedQueryProvider` (viewer's Region RLS) and is executed before anything is published.
-  - `--replace` rebuilds an existing dashboard.
+  - `--replace` rebuilds an existing dashboard. It only deletes the cards this command created (tagged `source=forecast-dashboard`); any other card on the dashboard is kept and moved below the forecast grid.
+  - `bootstrap` always creates `Forecast Backtest` and the `Forecast Accuracy` view (empty until a backtest runs), so `ask` and the dashboard never hit a missing relation.
 - **Caveats.**
   - `Predicted Sales` is the forecast of **one representative order line**, not a monthly total. That's why the dashboard shows the average predicted line ticket.
   - History (2014–2017) and forecast (next months from today) are separate cards, because there is a gap between them.
   - Forecast profiles cover the 10 most frequent Region × Category pairs, so a viewer whose region is not among them gets empty forecast cards. The history and backtest cards still show data for that viewer.
+  - The cards are a snapshot: they pin the `run_id` active when they were created, and the forecast cards filter by `CURRENT_DATE`. So the forecast cards go empty about `SEED_SALES_PREDICTIONS_MONTHS` months after seeding, and after promoting a new run they keep showing the old run.
+    In both cases, reseed/backtest and re-run the command with `--replace`.
 - Try it: `uv run python -m src.cli.main ask "¿Cuál es el WAPE del modelo por categoría?" --viewer <person>`.
 
 ### Milestones delivered
@@ -409,6 +412,8 @@ uv run python -m src.cli.main metabase forecast-dashboard --viewer <person> [--r
 ```
 
 The backtest fills `Forecast Backtest` / `Forecast Accuracy` for the run active in `--env`. The dashboard command publishes a "Forecast: \<viewer\>" dashboard whose cards carry the viewer's regional RLS snapshot. Reseed (Step 13) and backtest again after promoting a new run, so the cards point to data for the active run.
+
+The cards pin the `run_id` active at creation and the forecast cards filter by `CURRENT_DATE`: after a new promotion they keep showing the old run, and they go empty about `SEED_SALES_PREDICTIONS_MONTHS` months after seeding. Re-run with `--replace` (after reseeding) to refresh them; it only replaces the cards this command created.
 
 See [Ossie migration validation and limitations](docs/semantic-migration.md) for
 the current semantic workflow. The historical feature guides remain available:
