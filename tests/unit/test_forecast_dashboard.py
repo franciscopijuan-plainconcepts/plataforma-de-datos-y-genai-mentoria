@@ -199,3 +199,23 @@ def test_cli_skips_existing_dashboard_unless_replace(monkeypatch: pytest.MonkeyP
     cli.main(["metabase", "forecast-dashboard", "--viewer", "marilene_rousseau", "--replace"])
     kinds = [kind for kind, _ in metabase.calls]
     assert kinds == ["create"] * 6 + ["layout", "delete", "delete"]
+
+
+def test_get_or_create_dashboard_lists_collection_items() -> None:
+    """v0.58: find by name through the collection items, create only when missing."""
+    seen: list[tuple[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/session":
+            return httpx.Response(200, json={"id": "token"})
+        seen.append((request.method, str(request.url)))
+        if request.url.path == "/api/collection/5/items":
+            return httpx.Response(200, json={"data": [{"id": 3, "name": "Forecast: ana", "model": "dashboard"}]})
+        return httpx.Response(200, json={"id": 4, "name": "Forecast: bob"})
+
+    client = _client_with_handler(handler)
+    found = client.get_or_create_dashboard("Forecast: ana", 5)
+    assert found is not None and found.id == 3
+    assert seen == [("GET", "http://test.local/api/collection/5/items?models=dashboard")]
+    created = client.get_or_create_dashboard("Forecast: bob", 5)
+    assert created is not None and created.id == 4 and seen[-1][0] == "POST"

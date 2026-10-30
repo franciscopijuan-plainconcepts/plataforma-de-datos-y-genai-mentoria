@@ -433,12 +433,17 @@ class MetabaseClient:
     ) -> Dashboard | None:
         """Find or create a dashboard by name within a collection."""
         try:
+            # v0.58 rejects `GET /api/dashboard?f=collection_id=...` (f only
+            # accepts all|mine|archived); list the collection's dashboards.
             list_response = self._request_with_reauth(
-                "GET", f"/api/dashboard?f=collection_id%3D{collection_id}"
+                "GET", f"/api/collection/{collection_id}/items?models=dashboard"
             )
             list_response.raise_for_status()
-            for dash in list_response.json():
-                if dash.get("name") == name:
+            items = list_response.json()
+            if isinstance(items, dict):
+                items = items.get("data", [])
+            for dash in items:
+                if dash.get("model", "dashboard") == "dashboard" and dash.get("name") == name:
                     return Dashboard(
                         id=int(dash["id"]),
                         name=str(dash["name"]),
