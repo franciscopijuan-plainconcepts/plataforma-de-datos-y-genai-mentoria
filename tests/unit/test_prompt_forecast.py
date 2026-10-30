@@ -3,7 +3,8 @@
 from src.ai_engineering.prompt_builder import build_prompt
 from src.contracts.data_access import ColumnDef, LogicalType, TableDef
 from src.contracts.semantic_layer import Metric
-from src.contracts.text_to_sql import NLQuestion
+from src.contracts.text_to_sql import ForecastScope, NLQuestion
+from src.mlops.predictions_store import forecast_accuracy_view_def, predictions_table_def
 from tests.semantic_fixtures import _build_test_dictionary, _build_test_table_defs, _load_test_semantic_layer
 
 
@@ -13,7 +14,7 @@ _ACCURACY = TableDef(name="Forecast Accuracy", description="Backtest accuracy.",
 ])
 
 
-def _prompt(extra_tables: dict[str, TableDef] | None = None) -> str:
+def _prompt(extra_tables: dict[str, TableDef] | None = None, scope: ForecastScope | None = None) -> str:
     tables = _build_test_table_defs()
     dictionary = _build_test_dictionary(tables)
     layer = _load_test_semantic_layer(dictionary)
@@ -21,7 +22,8 @@ def _prompt(extra_tables: dict[str, TableDef] | None = None) -> str:
         name="forecast_abs_error", formula_sql='SUM("Abs Error")', business_description="Abs error.",
         source_table="Forecast Accuracy", aggregation="SUM",
     )]})
-    return build_prompt(NLQuestion(text="model error by region"), dictionary, tables[0], layer, extra_tables)
+    return build_prompt(NLQuestion(text="model error by region"), dictionary, tables[0], layer, extra_tables,
+                        forecast_scope=scope)
 
 
 def test_non_orders_metric_is_tagged_with_its_source() -> None:
@@ -33,3 +35,24 @@ def test_non_orders_metric_is_tagged_with_its_source() -> None:
 def test_accuracy_rule_only_when_view_is_queryable() -> None:
     assert 'query "Forecast Accuracy" alone' not in _prompt()
     assert 'query "Forecast Accuracy" alone' in _prompt({"forecast accuracy": _ACCURACY})
+
+
+_FORECAST = {"predictions": predictions_table_def(), "forecast accuracy": forecast_accuracy_view_def()}
+
+
+def test_forecast_tables_are_scoped_to_the_active_run() -> None:
+    prompt = _prompt(_FORECAST, ForecastScope(run_id="run-7", environment="prod"))
+    assert '"Predictions" with "Environment" = \'prod\' AND "Run ID" = \'run-7\'' in prompt
+    assert '"Forecast Accuracy" with "Run ID" = \'run-7\'' in prompt
+    assert "explicitly compares runs or environments" in prompt
+
+
+def test_no_run_rule_without_scope_but_per_line_rule_always() -> None:
+    prompt = _prompt(_FORECAST)
+    assert '"Run ID" = \'' not in prompt
+    assert 'AVG("Predicted Sales")' in prompt and "ONE representative order line" in prompt
+
+
+def test_scope_values_are_quoted_safely() -> None:
+    prompt = _prompt(_FORECAST, ForecastScope(run_id="x' OR '1'='1", environment="prod"))
+    assert "\'x\'\' OR \'\'1\'\'=\'\'1\'" in prompt

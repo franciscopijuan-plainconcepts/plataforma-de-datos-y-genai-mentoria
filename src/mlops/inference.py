@@ -75,12 +75,14 @@ def predict_feature_rows(
     """Score many feature rows with an already-loaded model in one call.
 
     Single prediction path shared by `predict_sales` and the batch backtest.
+    Sales can't be negative (`SalesFeatureRow.sales >= 0`), but the linear
+    model can extrapolate below zero, so predictions are clamped at 0.
     """
     if model_name == "linear_regression":
         predictions = model.predict(build_linear_feature_matrix(feature_rows))
     else:
         predictions = model.predict(build_catboost_feature_matrix(feature_rows))
-    return [float(value) for value in predictions]
+    return [max(0.0, float(value)) for value in predictions]
 
 
 def _check_unseen_categories(

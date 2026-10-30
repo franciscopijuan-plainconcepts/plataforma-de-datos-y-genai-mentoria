@@ -24,7 +24,7 @@ from __future__ import annotations
 from src.contracts.data_access import TableDef
 from src.contracts.dictionary import DataDictionaryDocument
 from src.contracts.semantic_layer import SemanticLayerDocument
-from src.contracts.text_to_sql import NLQuestion
+from src.contracts.text_to_sql import ForecastScope, NLQuestion
 
 _SYSTEM_INSTRUCTION = (
     "You are a data analyst assistant. Translate the user's natural-language "
@@ -63,6 +63,7 @@ def build_prompt(
     table_def: TableDef,
     semantic_layer: SemanticLayerDocument | None = None,
     extra_tables: dict[str, TableDef] | None = None,
+    forecast_scope: ForecastScope | None = None,
 ) -> str:
     """Build the LLM prompt from the dictionary + (optional) semantic layer + NL question.
 
@@ -189,6 +190,26 @@ def build_prompt(
                 '- For model accuracy/error questions (predicted vs actual, error, '
                 'WAPE, bias, backtest), query "Forecast Accuracy" alone: each row '
                 "already holds actual and predicted Sales for one month/Region/Category."
+            )
+        extra_names = {td.name for td in extra_tables.values()}
+        if "Predictions" in extra_names:
+            rules = (
+                f"{rules}\n"
+                '- "Predicted Sales" is the forecast of ONE representative order line, '
+                'not a sales total: answer predicted sales/ticket questions with AVG("Predicted '
+                'Sales") and never present SUM("Predicted Sales") as a monthly or regional total.'
+            )
+        if forecast_scope is not None and extra_names & {"Predictions", "Forecast Accuracy"}:
+            # v3.3: both tables accumulate every model run; without a filter
+            # an answer silently mixes models once the model is retrained.
+            run = forecast_scope.run_id.replace("'", "''")
+            env = forecast_scope.environment.replace("'", "''")
+            rules = (
+                f"{rules}\n"
+                "- Forecast tables hold rows from several model runs. Unless the question "
+                "explicitly compares runs or environments, ALWAYS filter "
+                f'"Predictions" with "Environment" = \'{env}\' AND "Run ID" = \'{run}\', and '
+                f'"Forecast Accuracy" with "Run ID" = \'{run}\' (the active model).'
             )
     prompt_parts.append(rules)
     prompt_parts.append("")

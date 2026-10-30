@@ -134,17 +134,22 @@ def run_backtest(
     orders_table_def: TableDef,
     registry: ArtifactRegistry,
     environment: EnvironmentName = "prod",
+    force: bool = False,
 ) -> int:
     """Score the holdout of the run active in `environment` and persist it.
 
     Returns the number of rows written (`0` when this run was already
-    backtested or has no holdout rows).
+    backtested or has no holdout rows). `force=True` deletes this run's rows
+    first and scores it again (e.g. after a scoring fix); other runs' history
+    is untouched.
     """
     ensure_backtest_objects(repo)
     entry = registry.resolve_active_run(environment)
     if entry is None:
         raise NoActiveModelError(f"No active model promoted in environment {environment!r}.")
-    if _has_backtest(repo, entry.run_id):
+    if force:
+        repo.delete_rows_where(BACKTEST_TABLE_NAME, "Run ID", entry.run_id)
+    elif _has_backtest(repo, entry.run_id):
         return 0
 
     feature_set = extract_feature_set(repo, orders_table_def)

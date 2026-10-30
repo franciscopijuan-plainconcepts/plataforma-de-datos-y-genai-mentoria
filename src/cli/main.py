@@ -47,6 +47,7 @@ from src.data_engineering.ingestion.manifest import (
 
 if TYPE_CHECKING:
     from src.contracts.dictionary import DataDictionaryDocument
+    from src.contracts.text_to_sql import ForecastScope
     from src.ai_engineering.pipeline import TextToSqlPipeline
     # Avoid top-level import cycle: MetabaseSession is used only in type hints
     # of private helpers that are invoked after the runtime import inside the
@@ -177,6 +178,24 @@ def _forecast_extra_tables() -> dict[str, TableDef]:
     return {name.lower(): table_def for name, table_def in forecast_semantic_tables().items()}
 
 
+def _active_forecast_scope() -> "ForecastScope | None":
+    """Best-effort: the model run active in SEED_SALES_PREDICTIONS_ENV, so NL
+    answers over the forecast tables don't mix runs. None when unavailable."""
+    from src.contracts.text_to_sql import ForecastScope
+
+    environment = os.environ.get("SEED_SALES_PREDICTIONS_ENV", "prod")
+    try:
+        from src.mlops.registry import ArtifactRegistry
+
+        active = ArtifactRegistry().resolve_active_run(cast("Any", environment))
+    except Exception as exc:
+        _info(f"WARNING: active forecast run unavailable, forecast answers are not run-scoped: {exc}")
+        return None
+    if active is None:
+        return None
+    return ForecastScope(run_id=active.run_id, environment=environment)
+
+
 def _load_semantic_context() -> tuple["DataDictionaryDocument", TableDef, "SemanticLayerDocument", str]:
     from src.data_engineering.semantic_layer.ossie import import_ossie, read_ossie_document
     from src.mlops.predictions_store import forecast_semantic_tables
@@ -302,11 +321,18 @@ def cmd_bootstrap(source_file: str | None = None) -> None:
         # pending). Disable entirely with SEED_SALES_PREDICTIONS=false;
         # re-run/force manually anytime with `seed-sales-predictions`.
         if os.environ.get("SEED_SALES_PREDICTIONS", "true").lower() != "false":
-            _seed_sales_predictions(repo)
-            # v3.3: backtest the active run so `Forecast Accuracy` has data.
-            # Same best-effort contract; disable with SEED_FORECAST_BACKTEST=false.
-            if os.environ.get("SEED_FORECAST_BACKTEST", "true").lower() != "false":
-                _run_forecast_backtest(repo)
+            # Orders schema of the workbook actually being loaded (honors
+            # --source): re-inferring the default workbook inside the helpers
+            # could `_err` (SystemExit) and abort a best-effort step.
+            orders_def = next((td for td in infer_table_defs(tables) if td.name == "Orders"), None)
+            if orders_def is None:
+                _info("WARNING: Orders not found in the loaded workbook — skipping seeding and backtest.")
+            else:
+                _seed_sales_predictions(repo, orders_def)
+                # v3.3: backtest the active run so `Forecast Accuracy` has data.
+                # Same best-effort contract; disable with SEED_FORECAST_BACKTEST=false.
+                if os.environ.get("SEED_FORECAST_BACKTEST", "true").lower() != "false":
+                    _run_forecast_backtest(repo, orders_def)
 
     # --- Manifest provenance ---
     manifest = build_manifest(inference, load_results)
@@ -316,7 +342,7 @@ def cmd_bootstrap(source_file: str | None = None) -> None:
     _info("Bootstrap complete. Run `validate` to confirm.")
 
 
-def _seed_sales_predictions(repo: PostgresRepository, force: bool = False) -> None:
+def _seed_sales_predictions(repo: PostgresRepository, orders_def: TableDef, force: bool = False) -> None:
     """Best-effort: train/promote a model if needed, then populate
     `Predictions` with deterministic forecasts for the next months (no
     LLM involved — see `src/mlops/seed_predictions.py`). Never raises;
@@ -328,7 +354,6 @@ def _seed_sales_predictions(repo: PostgresRepository, force: bool = False) -> No
         from src.mlops.registry import ArtifactRegistry
         from src.mlops.seed_predictions import seed_future_predictions
 
-        orders_def = _infer_orders_table_def()
         registry = ArtifactRegistry()
         _info(f"Seeding future Sales predictions (env={environment}, months_ahead={months_ahead})...")
         written = seed_future_predictions(
@@ -347,7 +372,7 @@ def _seed_sales_predictions(repo: PostgresRepository, force: bool = False) -> No
         _info(f"WARNING: seeding future Sales predictions failed (non-fatal): {exc}")
 
 
-def _run_forecast_backtest(repo: PostgresRepository) -> None:
+def _run_forecast_backtest(repo: PostgresRepository, orders_def: TableDef) -> None:
     """Best-effort: backtest the run active in the seeding environment into
     `Forecast Backtest` (see `src/mlops/backtest.py`). Never raises."""
     environment = os.environ.get("SEED_SALES_PREDICTIONS_ENV", "prod")
@@ -356,8 +381,7 @@ def _run_forecast_backtest(repo: PostgresRepository) -> None:
         from src.mlops.registry import ArtifactRegistry
 
         _info(f"Backtesting the active sales model on its holdout (env={environment})...")
-        written = run_backtest(repo, _infer_orders_table_def(), ArtifactRegistry(),
-                               environment=cast("Any", environment))
+        written = run_backtest(repo, orders_def, ArtifactRegistry(), environment=cast("Any", environment))
         if written:
             _info(f"Scored {written} holdout order lines into 'Forecast Backtest' (env={environment}).")
         else:
@@ -769,6 +793,7 @@ def _compose_ask_pipeline(
             viewer=viewer,
             on_query_complete=on_query_complete,
             extra_tables=extra_tables,
+            forecast_scope=_active_forecast_scope(),
         )
         yield pipeline, viewer
 
@@ -1014,7 +1039,7 @@ def cmd_seed_sales_predictions(environment: str, months_ahead: int, force: bool)
         print("Future predictions already present for the active model — skipped (use --force to reseed).")
 
 
-def cmd_backtest_sales_model(environment: str) -> None:
+def cmd_backtest_sales_model(environment: str, force: bool = False) -> None:
     """backtest-sales-model: score the active run's holdout into `Forecast Backtest`.
 
     Idempotent per run; `bootstrap` already runs it after seeding. Feeds the
@@ -1029,7 +1054,8 @@ def cmd_backtest_sales_model(environment: str) -> None:
     orders_def = _infer_orders_table_def()
     try:
         with PostgresRepository(config=PostgresConfig.from_env()) as repo:
-            written = run_backtest(repo, orders_def, ArtifactRegistry(), environment=cast("Any", environment))
+            written = run_backtest(repo, orders_def, ArtifactRegistry(),
+                                   environment=cast("Any", environment), force=force)
     except RegistryError as exc:
         _err(str(exc))
     except Exception as exc:
@@ -1038,7 +1064,7 @@ def cmd_backtest_sales_model(environment: str) -> None:
     if written:
         print(f"Scored {written} holdout order lines into 'Forecast Backtest' (env={environment}).")
     else:
-        print("Active model already backtested (or no holdout rows) — skipped.")
+        print("Active model already backtested (or no holdout rows) — skipped (use --force to re-score it).")
 
 
 def cmd_predict_sales(environment: str, input_payload: dict[str, str]) -> None:
@@ -1595,7 +1621,8 @@ def main(argv: list[str] | None = None) -> None:
         print("  seed-sales-predictions [--env ENV] [--months-ahead N] [--force]")
         print("                                      Batch-forecast next months into `Predictions`")
         print("                                      (runs automatically at the end of `bootstrap`)")
-        print("  backtest-sales-model [--env ENV]    Score the active model's holdout (predicted vs")
+        print("  backtest-sales-model [--env ENV] [--force]")
+        print("                                      Score the active model's holdout (predicted vs")
         print("                                      actual) into `Forecast Backtest` / `Forecast Accuracy`")
         sys.exit(0 if args else 1)
 
@@ -1864,13 +1891,20 @@ def main(argv: list[str] | None = None) -> None:
         return
     if command == "backtest-sales-model":
         backtest_environment = "prod"
-        if rest[:1] == ["--env"] and len(rest) == 2:
-            backtest_environment = rest[1]
-        elif rest:
-            _err("Usage: python -m src.cli.main backtest-sales-model [--env <dev|staging|prod>]")
+        backtest_force = False
+        i = 0
+        while i < len(rest):
+            if rest[i] == "--env" and i + 1 < len(rest):
+                backtest_environment = rest[i + 1]
+                i += 2
+            elif rest[i] == "--force":
+                backtest_force = True
+                i += 1
+            else:
+                _err("Usage: python -m src.cli.main backtest-sales-model [--env <dev|staging|prod>] [--force]")
         if backtest_environment not in {"dev", "staging", "prod"}:
             _err(f"Invalid environment: {backtest_environment!r}. Use dev|staging|prod.")
-        cmd_backtest_sales_model(backtest_environment)
+        cmd_backtest_sales_model(backtest_environment, backtest_force)
         return
     handler = _COMMANDS.get(command)
     if handler is None:

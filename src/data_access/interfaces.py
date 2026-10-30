@@ -86,6 +86,14 @@ class DataProvider(Protocol):
         """Return the row count of a table (used by the validator)."""
         ...
 
+    def delete_rows_where(self, table_name: str, column: str, value: str) -> int:
+        """Delete the rows whose `column` equals `value`; returns how many.
+
+        Platform maintenance only (e.g. re-scoring one backtest run), never a
+        path for generated SQL.
+        """
+        ...
+
     def list_tables(self) -> list[str]:
         """List tables in the warehouse schema."""
         ...

@@ -212,6 +212,17 @@ class PostgresRepository:
             raw_rows = cur.fetchall()
         return [OrderRow.model_validate(r) for r in raw_rows]
 
+    def delete_rows_where(self, table_name: str, column: str, value: str) -> int:
+        """Parameterized `DELETE ... WHERE column = value` (identifiers quoted)."""
+        with self._conn.cursor() as cur:
+            cur.execute(
+                SQL("DELETE FROM {} WHERE {} = %s").format(Identifier(table_name), Identifier(column)),
+                (value,),
+            )
+            deleted = cur.rowcount
+        self._conn.commit()
+        return deleted
+
     def count_rows(self, table_name: str) -> int:
         """Return the row count of a table (used by the validator)."""
         with self._conn.cursor() as cur:

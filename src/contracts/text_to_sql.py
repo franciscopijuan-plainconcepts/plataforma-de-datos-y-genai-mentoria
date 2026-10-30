@@ -121,6 +121,19 @@ class QueryResult(BaseModel):
     provenance: SemanticModelProvenance | None = None
 
 
+class ForecastScope(BaseModel):
+    """Model run the forecast tables must be read for (v3.3).
+
+    `Predictions` and `Forecast Accuracy` accumulate rows from every model run
+    and environment; NL answers default to the run active in `environment`.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    run_id: str
+    environment: str
+
+
 class PreparedQuery(BaseModel):
     """Immutable request-scoped SQL and access snapshot; no SDK models or secrets."""
 
@@ -199,6 +212,7 @@ __all__ = [
     "QueryRow",
     "QueryResult",
     "PreparedQuery",
+    "ForecastScope",
     "GovernedExecutionProvider",
     "TextToSqlRequest",
     "TextToSqlResponse",

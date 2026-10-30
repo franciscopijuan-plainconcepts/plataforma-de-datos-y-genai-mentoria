@@ -21,6 +21,7 @@ from src.contracts.text_to_sql import QueryRow
 from src.data_engineering.semantic_layer.resolver import SemanticQueryResolver
 from src.mlops.backtest import BacktestRepository, run_backtest, select_holdout
 from src.mlops.catboost_model import fit_catboost_model
+from src.mlops.inference import predict_feature_rows
 from src.mlops.predictions_store import (
     BACKTEST_TABLE_NAME,
     FORECAST_ACCURACY_SQL,
@@ -64,6 +65,12 @@ class _FakeRepo:
 
     def count_rows(self, table_name: str) -> int:  # pragma: no cover
         return len(self.loaded)
+
+    def delete_rows_where(self, table_name: str, column: str, value: str) -> int:
+        assert (table_name, column) == (BACKTEST_TABLE_NAME, "Run ID")
+        kept = [row for row in self.loaded if row.run_id != value]
+        deleted, self.loaded = len(self.loaded) - len(kept), kept
+        return deleted
 
     def list_tables(self) -> list[str]:  # pragma: no cover
         return self.tables
@@ -183,6 +190,27 @@ def test_run_backtest_is_idempotent_per_run(promoted: tuple[ArtifactRegistry, da
         assert run_backtest(repo, _orders_def(), registry, environment="dev") == 0
     assert extract.call_count == 1
     assert len(repo.loaded) == 5
+
+
+def test_force_rescores_only_the_active_run(promoted: tuple[ArtifactRegistry, datetime]) -> None:
+    registry, _ = promoted
+    repo = _FakeRepo()
+    with patch("src.mlops.backtest.extract_feature_set", return_value=_feature_set()):
+        assert run_backtest(repo, _orders_def(), registry, environment="dev") == 5
+        other_run = repo.loaded[0].model_copy(update={"run_id": "older-run", "backtest_id": "older-run:0"})
+        repo.loaded.append(other_run)
+        assert run_backtest(repo, _orders_def(), registry, environment="dev", force=True) == 5
+    assert len(repo.loaded) == 6
+    assert other_run in repo.loaded
+
+
+def test_predictions_are_clamped_at_zero() -> None:
+    class _NegativeModel:
+        def predict(self, matrix: object) -> list[float]:
+            return [-12.5, 0.0, 42.0]
+
+    rows = sample_training_rows()[:3]
+    assert predict_feature_rows(_NegativeModel(), "catboost", rows) == [0.0, 0.0, 42.0]  # type: ignore[arg-type]
 
 
 def test_ensure_backtest_objects_needs_no_ml_imports() -> None:
