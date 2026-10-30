@@ -110,6 +110,13 @@ class PostgresRepository:
             cur.execute(ddl)
         self._conn.commit()
 
+    def create_or_replace_view(self, name: str, select_sql: str) -> None:
+        """CREATE OR REPLACE VIEW from a platform-authored SELECT (never LLM SQL)."""
+        ddl = SQL("CREATE OR REPLACE VIEW {} AS {}").format(Identifier(name), SQL(select_sql))
+        with self._conn.cursor() as cur:
+            cur.execute(ddl)
+        self._conn.commit()
+
     def drop_table(self, name: str) -> None:
         """Drop a table by name (IF EXISTS to be idempotent)."""
         with self._conn.cursor() as cur:

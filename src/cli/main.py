@@ -171,6 +171,7 @@ def _info(msg: str) -> None:
 
 def _load_semantic_context() -> tuple["DataDictionaryDocument", TableDef, "SemanticLayerDocument", str]:
     from src.data_engineering.semantic_layer.ossie import import_ossie, read_ossie_document
+    from src.mlops.predictions_store import forecast_semantic_tables
 
     try:
         text = read_ossie_document(_OSSIE_MODEL_PATH)
@@ -191,7 +192,7 @@ def _load_semantic_context() -> tuple["DataDictionaryDocument", TableDef, "Seman
         _err("Orders table not found in inferred schema.")
     document = generate_dictionary(inference, table_defs)
     try:
-        semantic_doc = import_ossie(text, document)
+        semantic_doc = import_ossie(text, document, forecast_semantic_tables())
     except ValueError as exc:
         _err(f"Canonical Ossie model {_OSSIE_MODEL_PATH} is incompatible: {exc}. No legacy fallback is enabled.")
     if semantic_doc.provenance is None:
@@ -290,6 +291,10 @@ def cmd_bootstrap(source_file: str | None = None) -> None:
         # re-run/force manually anytime with `seed-sales-predictions`.
         if os.environ.get("SEED_SALES_PREDICTIONS", "true").lower() != "false":
             _seed_sales_predictions(repo)
+            # v3.3: backtest the active run so `Forecast Accuracy` has data.
+            # Same best-effort contract; disable with SEED_FORECAST_BACKTEST=false.
+            if os.environ.get("SEED_FORECAST_BACKTEST", "true").lower() != "false":
+                _run_forecast_backtest(repo)
 
     # --- Manifest provenance ---
     manifest = build_manifest(inference, load_results)
@@ -328,6 +333,25 @@ def _seed_sales_predictions(repo: PostgresRepository, force: bool = False) -> No
             _info("Future predictions already present for the active model — skipped (use --force to reseed).")
     except Exception as exc:
         _info(f"WARNING: seeding future Sales predictions failed (non-fatal): {exc}")
+
+
+def _run_forecast_backtest(repo: PostgresRepository) -> None:
+    """Best-effort: backtest the run active in the seeding environment into
+    `Forecast Backtest` (see `src/mlops/backtest.py`). Never raises."""
+    environment = os.environ.get("SEED_SALES_PREDICTIONS_ENV", "prod")
+    try:
+        from src.mlops.backtest import run_backtest
+        from src.mlops.registry import ArtifactRegistry
+
+        _info(f"Backtesting the active sales model on its holdout (env={environment})...")
+        written = run_backtest(repo, _infer_orders_table_def(), ArtifactRegistry(),
+                               environment=cast("Any", environment))
+        if written:
+            _info(f"Scored {written} holdout order lines into 'Forecast Backtest' (env={environment}).")
+        else:
+            _info("Active model already backtested — skipped.")
+    except Exception as exc:
+        _info(f"WARNING: forecast backtest failed (non-fatal): {exc}")
 
 
 def cmd_teardown(remove_volume: bool | None = None) -> None:
@@ -656,9 +680,14 @@ def _compose_ask_pipeline(
     # it, not just the deterministic `predict-sales-nl` single-row path.
     # Best-effort: if the table doesn't exist yet (never seeded), we still
     # advertise its schema — `ask` will just return 0 rows, which is fine.
-    from src.mlops.predictions_store import predictions_table_def
+    # v3.3: the `Forecast Accuracy` backtest view is queryable the same way
+    # (single table, own Region column -> same RLS), for model-error questions.
+    from src.mlops.predictions_store import forecast_accuracy_view_def, predictions_table_def
 
-    extra_tables = {"predictions": predictions_table_def()}
+    extra_tables = {
+        "predictions": predictions_table_def(),
+        "forecast accuracy": forecast_accuracy_view_def(),
+    }
 
     llm_client = LlmClient(llm_config)
 
@@ -964,6 +993,33 @@ def cmd_seed_sales_predictions(environment: str, months_ahead: int, force: bool)
         print(f"Seeded {written} future predictions into 'Predictions' (env={environment}, months_ahead={months_ahead}).")
     else:
         print("Future predictions already present for the active model — skipped (use --force to reseed).")
+
+
+def cmd_backtest_sales_model(environment: str) -> None:
+    """backtest-sales-model: score the active run's holdout into `Forecast Backtest`.
+
+    Idempotent per run; `bootstrap` already runs it after seeding. Feeds the
+    `Forecast Accuracy` view (predicted vs actual, error) — the M5 drift base.
+    """
+    from src.mlops.backtest import run_backtest
+    from src.mlops.registry import ArtifactRegistry, RegistryError
+
+    if not _docker_available():
+        _err("Docker is not running. Run `bootstrap` first to start the warehouse.")
+
+    orders_def = _infer_orders_table_def()
+    try:
+        with PostgresRepository(config=PostgresConfig.from_env()) as repo:
+            written = run_backtest(repo, orders_def, ArtifactRegistry(), environment=cast("Any", environment))
+    except RegistryError as exc:
+        _err(str(exc))
+    except Exception as exc:
+        _err(f"backtest-sales-model failed: {exc}")
+
+    if written:
+        print(f"Scored {written} holdout order lines into 'Forecast Backtest' (env={environment}).")
+    else:
+        print("Active model already backtested (or no holdout rows) — skipped.")
 
 
 def cmd_predict_sales(environment: str, input_payload: dict[str, str]) -> None:
@@ -1371,7 +1427,7 @@ def main(argv: list[str] | None = None) -> None:
     """CLI entrypoint: `python -m src.cli <command>`."""
     args = argv if argv is not None else sys.argv[1:]
     if not args or args[0] in ("-h", "--help"):
-        print("Usage: python -m src.cli.main {bootstrap|teardown|validate|generate-dictionary|generate-semantic-layer|metabase|ask|chart|evaluate|train-sales-model|promote-sales-model|predict-sales|predict-sales-nl|seed-sales-predictions} [args]")
+        print("Usage: python -m src.cli.main {bootstrap|teardown|validate|generate-dictionary|generate-semantic-layer|metabase|ask|chart|evaluate|train-sales-model|promote-sales-model|predict-sales|predict-sales-nl|seed-sales-predictions|backtest-sales-model} [args]")
         print("Commands:")
         print("  bootstrap [--source PATH]        Bring up PG, load data, write manifest")
         print("  teardown [--remove-volume]        Stop & remove container (and optionally volume)")
@@ -1402,6 +1458,8 @@ def main(argv: list[str] | None = None) -> None:
         print("  seed-sales-predictions [--env ENV] [--months-ahead N] [--force]")
         print("                                      Batch-forecast next months into `Predictions`")
         print("                                      (runs automatically at the end of `bootstrap`)")
+        print("  backtest-sales-model [--env ENV]    Score the active model's holdout (predicted vs")
+        print("                                      actual) into `Forecast Backtest` / `Forecast Accuracy`")
         sys.exit(0 if args else 1)
 
     command = args[0]
@@ -1640,9 +1698,19 @@ def main(argv: list[str] | None = None) -> None:
             _err(f"Invalid environment: {seed_environment!r}. Use dev|staging|prod.")
         cmd_seed_sales_predictions(seed_environment, seed_months_ahead, seed_force)
         return
+    if command == "backtest-sales-model":
+        backtest_environment = "prod"
+        if rest[:1] == ["--env"] and len(rest) == 2:
+            backtest_environment = rest[1]
+        elif rest:
+            _err("Usage: python -m src.cli.main backtest-sales-model [--env <dev|staging|prod>]")
+        if backtest_environment not in {"dev", "staging", "prod"}:
+            _err(f"Invalid environment: {backtest_environment!r}. Use dev|staging|prod.")
+        cmd_backtest_sales_model(backtest_environment)
+        return
     handler = _COMMANDS.get(command)
     if handler is None:
-        _err(f"Unknown command: {command!r}. Use bootstrap|teardown|validate|generate-dictionary|generate-semantic-layer|metabase|ask|chart|evaluate|train-sales-model|promote-sales-model|predict-sales|predict-sales-nl|seed-sales-predictions.")
+        _err(f"Unknown command: {command!r}. Use bootstrap|teardown|validate|generate-dictionary|generate-semantic-layer|metabase|ask|chart|evaluate|train-sales-model|promote-sales-model|predict-sales|predict-sales-nl|seed-sales-predictions|backtest-sales-model.")
 
     # Parse simple per-command args.
     if command == "bootstrap":

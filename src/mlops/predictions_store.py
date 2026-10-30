@@ -73,6 +73,84 @@ def predictions_table_def() -> TableDef:
     )
 
 
+# --- v3.3: backtest table + accuracy view (schemas only; scoring lives in
+# `src/mlops/backtest.py`, which pulls the heavy ML libraries) ---
+
+BACKTEST_TABLE_NAME = "Forecast Backtest"
+FORECAST_ACCURACY_VIEW_NAME = "Forecast Accuracy"
+
+# Platform-authored view DDL (never LLM output). Errors are computed on the
+# monthly aggregates, so they measure the forecast of totals the business
+# sees, not line-level noise that cancels out within a month.
+FORECAST_ACCURACY_SQL = (
+    'SELECT "Run ID", "Model Name", "Trained At", '
+    'date_trunc(\'month\', "Order Date") AS "Month", "Region", "Category", '
+    'SUM("Actual Sales") AS "Actual Sales", '
+    'SUM("Predicted Sales") AS "Predicted Sales", '
+    'ABS(SUM("Predicted Sales") - SUM("Actual Sales")) AS "Abs Error", '
+    'COUNT(*) AS "Line Count" '
+    'FROM "Forecast Backtest" '
+    'GROUP BY "Run ID", "Model Name", "Trained At", date_trunc(\'month\', "Order Date"), '
+    '"Region", "Category"'
+)
+
+
+def backtest_table_def() -> TableDef:
+    """Engine-neutral `TableDef` for the row-level `Forecast Backtest` table."""
+    return TableDef(
+        name=BACKTEST_TABLE_NAME,
+        description=(
+            "Row-level backtest: each out-of-sample historical order line scored "
+            "by a model run, with actual and predicted Sales."
+        ),
+        columns=[
+            ColumnDef(name="Backtest ID", logical_type=LogicalType.STRING, nullable=False, is_primary_key=True),
+            ColumnDef(name="Run ID", logical_type=LogicalType.STRING, nullable=False),
+            ColumnDef(name="Model Name", logical_type=LogicalType.STRING, nullable=False),
+            ColumnDef(name="Trained At", logical_type=LogicalType.TIMESTAMP, nullable=False),
+            ColumnDef(name="Order Date", logical_type=LogicalType.TIMESTAMP, nullable=False),
+            ColumnDef(name="Region", logical_type=LogicalType.STRING, nullable=False),
+            ColumnDef(name="Market", logical_type=LogicalType.STRING, nullable=False),
+            ColumnDef(name="Category", logical_type=LogicalType.STRING, nullable=False),
+            ColumnDef(name="Sub-Category", logical_type=LogicalType.STRING, nullable=False),
+            ColumnDef(name="Actual Sales", logical_type=LogicalType.DECIMAL, precision=18, scale=4, nullable=False),
+            ColumnDef(name="Predicted Sales", logical_type=LogicalType.DECIMAL, precision=18, scale=2, nullable=False),
+            ColumnDef(name="Scored At", logical_type=LogicalType.TIMESTAMP, nullable=False),
+        ],
+    )
+
+
+def forecast_accuracy_view_def() -> TableDef:
+    """`TableDef` of the `Forecast Accuracy` view (validator, prompt, Ossie)."""
+    return TableDef(
+        name=FORECAST_ACCURACY_VIEW_NAME,
+        description=(
+            "Backtest accuracy per model run, month, Region and Category: actual vs "
+            "predicted Sales of out-of-sample historical months and their absolute error."
+        ),
+        columns=[
+            ColumnDef(name="Run ID", logical_type=LogicalType.STRING, nullable=False),
+            ColumnDef(name="Model Name", logical_type=LogicalType.STRING, nullable=False),
+            ColumnDef(name="Trained At", logical_type=LogicalType.TIMESTAMP, nullable=False),
+            ColumnDef(name="Month", logical_type=LogicalType.TIMESTAMP, nullable=False),
+            ColumnDef(name="Region", logical_type=LogicalType.STRING, nullable=False),
+            ColumnDef(name="Category", logical_type=LogicalType.STRING, nullable=False),
+            ColumnDef(name="Actual Sales", logical_type=LogicalType.DECIMAL, precision=18, scale=4, nullable=False),
+            ColumnDef(name="Predicted Sales", logical_type=LogicalType.DECIMAL, precision=18, scale=2, nullable=False),
+            ColumnDef(name="Abs Error", logical_type=LogicalType.DECIMAL, precision=18, scale=4, nullable=False),
+            ColumnDef(name="Line Count", logical_type=LogicalType.INTEGER, nullable=False),
+        ],
+    )
+
+
+def forecast_semantic_tables() -> dict[str, TableDef]:
+    """Warehouse-managed datasets the Ossie model may declare (composition roots)."""
+    return {
+        predictions_table_def().name: predictions_table_def(),
+        FORECAST_ACCURACY_VIEW_NAME: forecast_accuracy_view_def(),
+    }
+
+
 def build_prediction_row(
     prediction_input: PredictionInput, result: PredictionResult
 ) -> PredictionRow:
@@ -120,7 +198,13 @@ def persist_prediction(
 
 
 __all__ = [
+    "BACKTEST_TABLE_NAME",
+    "FORECAST_ACCURACY_SQL",
+    "FORECAST_ACCURACY_VIEW_NAME",
     "PREDICTIONS_TABLE_NAME",
+    "backtest_table_def",
+    "forecast_accuracy_view_def",
+    "forecast_semantic_tables",
     "PredictionsRepository",
     "build_prediction_row",
     "ensure_predictions_table",

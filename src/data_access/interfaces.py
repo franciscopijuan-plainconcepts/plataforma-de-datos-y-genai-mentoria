@@ -47,6 +47,13 @@ class SchemaProvider(Protocol):
         """Check whether a table exists in the warehouse schema."""
         ...
 
+    def create_or_replace_view(self, name: str, select_sql: str) -> None:
+        """Materialize (or redefine) a read-only view from a trusted SELECT.
+
+        `select_sql` is platform-authored DDL input, never LLM output.
+        """
+        ...
+
 
 @runtime_checkable
 class DataProvider(Protocol):
