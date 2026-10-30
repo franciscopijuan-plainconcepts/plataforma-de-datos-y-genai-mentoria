@@ -282,3 +282,36 @@ def test_warehouse_metric_scoped_to_its_table(
     metric["expression"]["dialects"][0]["expression"] = formula
     with pytest.raises(ValueError, match=message):
         import_ossie(json.dumps(forecast_raw), dictionary, _WAREHOUSE)
+
+
+def _set_metric_meta(raw: dict, name: str, **updates: object) -> None:
+    metric = next(item for item in raw["metrics"] if item["name"] == name)
+    meta = json.loads(metric["custom_extensions"][0]["data"])
+    meta.update(updates)
+    metric["custom_extensions"][0]["data"] = json.dumps(meta)
+
+
+@pytest.mark.parametrize("child, parent", [
+    ("predicted_sales", "gross_sales"),
+    ("gross_sales", "predicted_sales"),
+])
+def test_derives_from_must_stay_on_one_table(
+    forecast_raw: dict, dictionary: DataDictionaryDocument, child: str, parent: str,
+) -> None:
+    _set_metric_meta(forecast_raw, child, derives_from=[parent])
+    with pytest.raises(ValueError, match=f"cannot derive from {parent}"):
+        import_ossie(json.dumps(forecast_raw), dictionary, _WAREHOUSE)
+
+
+def test_uses_returns_only_on_orders(forecast_raw: dict, dictionary: DataDictionaryDocument) -> None:
+    _set_metric_meta(forecast_raw, "predicted_sales", uses_returns=True)
+    with pytest.raises(ValueError, match="Predictions cannot use Returns"):
+        import_ossie(json.dumps(forecast_raw), dictionary, _WAREHOUSE)
+
+
+def test_canonical_model_dependencies_stay_within_their_table(dictionary: DataDictionaryDocument) -> None:
+    canonical = _load_test_semantic_layer(dictionary)
+    by_name = {metric.name: metric for metric in canonical.metrics}
+    assert any(metric.source_table == "Forecast Accuracy" and metric.derives_from for metric in canonical.metrics)
+    for metric in canonical.metrics:
+        assert all(by_name[parent].source_table == metric.source_table for parent in metric.derives_from)

@@ -463,8 +463,17 @@ def _validate_dependencies(metrics: list[Metric]) -> None:
         metric = by_name[name]
         if metric.aggregation == "RATIO" and len(metric.derives_from) != 2:
             raise ValueError(f"Ratio {name} requires exactly two dependencies")
+        # Returns is only reachable from Orders (see `_validate_formula`).
+        if metric.uses_returns and metric.source_table != "Orders":
+            raise ValueError(f"Metric {name} on {metric.source_table} cannot use Returns")
         for parent in metric.derives_from:
             visit(parent)
+            # A derived metric is evaluated over one table; no cross-table lineage.
+            if by_name[parent].source_table != metric.source_table:
+                raise ValueError(
+                    f"Metric {name} on {metric.source_table} cannot derive from "
+                    f"{parent} on {by_name[parent].source_table}"
+                )
         active.remove(name)
         visited.add(name)
     for name in by_name:
