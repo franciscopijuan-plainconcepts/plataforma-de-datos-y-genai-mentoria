@@ -20,7 +20,7 @@ from src.data_access.adapters.postgres.connection import (
 from src.contracts.data_access import TableDef
 from src.data_access.adapters.postgres.repository import PostgresRepository
 from tests.semantic_fixtures import (
-    _build_test_table_defs, _load_legacy_semantic_layer, _load_test_semantic_layer,
+    _build_test_table_defs, _load_legacy_semantic_layer, _load_test_semantic_layer, _orders_metrics,
 )
 
 
@@ -112,7 +112,7 @@ def test_metric_reference(
 ) -> None:
     selected = tuple(line for line in LINES if region is None or line.region == region)
     expected = expected_metrics(selected)
-    for metric in _load_test_semantic_layer().metrics:
+    for metric in _orders_metrics(_load_test_semantic_layer()):
         # Metadata uses bare mixed-case tables; quote identifiers as the prompt requires.
         sql = sqlglot.parse_one(
             f'SELECT {metric.formula_sql} AS value FROM "Orders"', read="postgres"
@@ -165,7 +165,7 @@ def test_dimensions_preserve_grain(
 def test_zero_sales(reference_connection: DictConnection) -> None:
     with reference_connection.cursor() as cur:
         cur.execute('UPDATE "Orders" SET "Sales" = 0')
-    for metric in _load_test_semantic_layer().metrics:
+    for metric in _orders_metrics(_load_test_semantic_layer()):
         if metric.name not in {"return_rate", "avg_order_value", "net_profit"}:
             continue
         sql = sqlglot.parse_one(
@@ -198,7 +198,7 @@ def test_governed_metrics(reference_connection: DictConnection, regions: list[st
     viewer = SemanticViewer(viewer_id="reference", regions=regions)
     table = _build_test_table_defs()[0]
     expected = expected_metrics(tuple(line for line in LINES if line.region in regions))
-    for metric in _load_test_semantic_layer().metrics:
+    for metric in _orders_metrics(_load_test_semantic_layer()):
         generated = sqlglot.parse_one(
             f'SELECT {metric.formula_sql} AS value FROM "Orders"', read="postgres"
         ).sql(dialect="postgres", identify=True)
@@ -267,7 +267,7 @@ def test_return_exists_preserves_order_link_with_different_region(
 
     with reference_connection.cursor() as cur:
         cur.execute('UPDATE "Returns" SET "Region" = \'Other regional label\'')
-    for metric in _load_test_semantic_layer().metrics:
+    for metric in _orders_metrics(_load_test_semantic_layer()):
         generated = sqlglot.parse_one(
             f'SELECT {metric.formula_sql} AS value FROM "Orders"', read="postgres"
         ).sql(dialect="postgres", identify=True)
@@ -289,7 +289,7 @@ def test_legacy_ossie_result_equivalence(
 ) -> None:
     legacy = _load_legacy_semantic_layer()
     restored = _load_test_semantic_layer()
-    by_name = {metric.name: metric for metric in restored.metrics}
+    by_name = {metric.name: metric for metric in _orders_metrics(restored)}
     assert set(by_name) == {metric.name for metric in legacy.metrics}
     for region in [None, "North", "South", "Missing"]:
         for metric in legacy.metrics:

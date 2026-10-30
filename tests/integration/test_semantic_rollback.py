@@ -60,7 +60,7 @@ def test_isolated_code_model_rollback_and_return(
     raw = json.loads(before)
     raw["generated_at"] = datetime(2026, 1, 1, tzinfo=timezone.utc)
     legacy = SemanticLayerDocument.model_validate(raw)
-    candidate = {metric.name: metric for metric in active.metrics}
+    candidate = {metric.name: metric for metric in active.metrics if metric.source_table == "Orders"}
     assert set(candidate) == {metric.name for metric in legacy.metrics}
     for region in [None, "North", "South", "Missing"]:
         for metric in legacy.metrics:

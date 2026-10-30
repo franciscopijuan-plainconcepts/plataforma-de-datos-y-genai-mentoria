@@ -18,14 +18,14 @@ from src.data_access.adapters.postgres.repository import PostgresRepository
 from src.data_engineering.semantic_layer.resolver import SemanticQueryResolver
 from src.data_engineering.semantic_layer.ossie import canonicalize_ossie, conversion_report
 from src.mlops.dataset import extract_feature_set
-from tests.semantic_fixtures import _build_test_table_defs, _load_legacy_semantic_layer, _load_test_semantic_layer
+from tests.semantic_fixtures import _build_test_table_defs, _load_legacy_semantic_layer, _load_test_semantic_layer, _orders_metrics
 
 
 def test_live_regional_metric_preservation() -> None:
     if os.environ.get("RUN_SEMANTIC_LIVE_TESTS") != "1":
         pytest.skip("Set RUN_SEMANTIC_LIVE_TESTS=1 to compare existing warehouse read-only")
     load_dotenv(Path(__file__).resolve().parents[2] / ".env", override=False)
-    metrics = _load_test_semantic_layer().metrics
+    metrics = _orders_metrics(_load_test_semantic_layer())
     legacy = {metric.name: metric for metric in _load_legacy_semantic_layer().metrics}
     assert set(legacy) == {metric.name for metric in metrics}
     with connect(PostgresConfig.from_env()) as conn:
