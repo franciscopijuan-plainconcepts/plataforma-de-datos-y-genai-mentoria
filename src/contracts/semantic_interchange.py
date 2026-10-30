@@ -9,6 +9,7 @@ from pydantic import BaseModel, ConfigDict, field_validator
 from src.contracts.semantic_layer import (
     DimensionType,
     MetricAggregation,
+    MetricSourceTable,
     SemanticRelationship,
     TableType,
 )
@@ -49,7 +50,7 @@ class FieldCompatibility(CompatibilityModel):
 
 
 class MetricCompatibility(CompatibilityModel):
-    source_table: Literal["Orders"]
+    source_table: MetricSourceTable
     aggregation: MetricAggregation
     derives_from: list[str]
     uses_returns: bool

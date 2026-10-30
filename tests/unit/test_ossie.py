@@ -7,8 +7,9 @@ import json
 
 import pytest
 
+from src.contracts.data_access import ColumnDef, LogicalType, TableDef
 from src.contracts.dictionary import DataDictionaryDocument
-from src.contracts.semantic_layer import SemanticLayerDocument
+from src.contracts.semantic_layer import Metric, SemanticLayerDocument, TableSemanticClassification
 from src.data_engineering.semantic_layer.ossie import (
     VENDOR,
     canonicalize_ossie,
@@ -198,3 +199,80 @@ def test_access_and_credentials_not_part_of_profile(
     raw["custom_extensions"][0]["data"] = json.dumps(profile)
     with pytest.raises(ValueError, match="Extra inputs"):
         import_ossie(json.dumps(raw), dictionary)
+
+
+# --- v3.3: warehouse-managed datasets (Predictions, Forecast Accuracy) ---
+
+_PREDICTIONS = TableDef(name="Predictions", description="Forecast rows.", columns=[
+    ColumnDef(name="Prediction ID", logical_type=LogicalType.STRING, nullable=False, is_primary_key=True),
+    ColumnDef(name="Predicted Sales", logical_type=LogicalType.DECIMAL, precision=18, scale=2, nullable=False),
+    ColumnDef(name="Region", logical_type=LogicalType.STRING, nullable=False),
+])
+_WAREHOUSE = {"Predictions": _PREDICTIONS}
+
+
+def _forecast_layer(layer: SemanticLayerDocument, formula: str = 'SUM("Predicted Sales")') -> SemanticLayerDocument:
+    return layer.model_copy(update={
+        "tables": [*layer.tables, TableSemanticClassification(
+            name="Predictions", table_type="fact", purpose="Forecast rows.")],
+        "metrics": [*layer.metrics, Metric(
+            name="predicted_sales", formula_sql=formula, business_description="Predicted sales.",
+            source_table="Predictions", aggregation="SUM")],
+    })
+
+
+@pytest.fixture()
+def forecast_raw(layer: SemanticLayerDocument, dictionary: DataDictionaryDocument) -> dict:
+    return json.loads(export_ossie(_forecast_layer(layer), dictionary, _WAREHOUSE))
+
+
+def test_warehouse_dataset_roundtrip(forecast_raw: dict, dictionary: DataDictionaryDocument) -> None:
+    restored = import_ossie(json.dumps(forecast_raw), dictionary, _WAREHOUSE)
+    metric = next(item for item in restored.metrics if item.name == "predicted_sales")
+    assert metric.source_table == "Predictions"
+    assert "Predictions" in {table.name for table in restored.tables}
+    dataset = next(item for item in forecast_raw["datasets"] if item["name"] == "Predictions")
+    assert dataset["primary_key"] == ["prediction_id"]
+    assert all("dimension" not in field for field in dataset["fields"])
+
+
+def test_warehouse_dataset_requires_definition(forecast_raw: dict, dictionary: DataDictionaryDocument) -> None:
+    with pytest.raises(ValueError, match="Unknown datasets without a warehouse definition"):
+        import_ossie(json.dumps(forecast_raw), dictionary)
+
+
+def test_warehouse_tables_are_optional(exported: str, dictionary: DataDictionaryDocument) -> None:
+    assert len(import_ossie(exported, dictionary, _WAREHOUSE).metrics) == 8
+
+
+def test_warehouse_tables_cannot_shadow_dictionary(exported: str, dictionary: DataDictionaryDocument) -> None:
+    with pytest.raises(ValueError, match="shadow"):
+        import_ossie(exported, dictionary, {"Orders": _PREDICTIONS})
+
+
+def test_warehouse_dataset_must_be_complete(forecast_raw: dict, dictionary: DataDictionaryDocument) -> None:
+    dataset = next(item for item in forecast_raw["datasets"] if item["name"] == "Predictions")
+    dataset["fields"] = [field for field in dataset["fields"] if field["name"] != "region"]
+    with pytest.raises(ValueError, match="Incomplete physical fields for dataset Predictions"):
+        import_ossie(json.dumps(forecast_raw), dictionary, _WAREHOUSE)
+
+
+def test_metric_source_must_be_declared(forecast_raw: dict, dictionary: DataDictionaryDocument) -> None:
+    forecast_raw["datasets"] = [item for item in forecast_raw["datasets"] if item["name"] != "Predictions"]
+    with pytest.raises(ValueError, match="source table Predictions is not declared"):
+        import_ossie(json.dumps(forecast_raw), dictionary, _WAREHOUSE)
+
+
+@pytest.mark.parametrize("formula, message", [
+    ('SUM("Sales")', 'non-existent column or qualifier: "Sales"'),
+    ('SUM(CASE WHEN EXISTS (SELECT 1 FROM Returns WHERE Returns."Order ID" = "Region") '
+     'THEN "Predicted Sales" ELSE 0 END)', "unsupported table Returns"),
+    ('SUM(Orders."Sales")', r'non-existent column or qualifier: Orders\."Sales"'),
+])
+def test_warehouse_metric_scoped_to_its_table(
+    forecast_raw: dict, dictionary: DataDictionaryDocument, formula: str, message: str,
+) -> None:
+    metric = next(item for item in forecast_raw["metrics"] if item["name"] == "predicted_sales")
+    metric["expression"]["dialects"][0]["expression"] = formula
+    with pytest.raises(ValueError, match=message):
+        import_ossie(json.dumps(forecast_raw), dictionary, _WAREHOUSE)

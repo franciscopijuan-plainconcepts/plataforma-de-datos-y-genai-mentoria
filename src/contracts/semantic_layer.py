@@ -35,6 +35,14 @@ from src.contracts.data_access import TableDef
 TableName = Literal["Orders", "Returns", "People"]
 """The three tables in the warehouse (from baseline feature 001)."""
 
+WarehouseTableName = Literal["Predictions", "Forecast Accuracy"]
+"""Warehouse-managed tables/views created by bootstrap/MLOps, not by the workbook
+(v3.3). They are declared in the Ossie model with their own TableDef supplied by
+the composition root, since the data dictionary does not know them."""
+
+MetricSourceTable = Literal["Orders", "Predictions", "Forecast Accuracy"]
+"""The single table a metric's scalar aggregate is evaluated FROM (v3.3)."""
+
 TableType = Literal["fact", "dimension", "governance_mapping"]
 """
 Classification of each table in the Semantic Layer:
@@ -84,7 +92,7 @@ class Metric(BaseModel):
     name: str = Field(pattern=r"^[a-z][a-z0-9_]*$")
     business_description: str
     formula_sql: str
-    source_table: Literal["Orders"]
+    source_table: MetricSourceTable
     aggregation: MetricAggregation
     derives_from: list[str] = []
     uses_returns: bool = False
@@ -132,7 +140,7 @@ class TableSemanticClassification(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
-    name: TableName
+    name: TableName | WarehouseTableName
     table_type: TableType
     purpose: str
 
@@ -226,6 +234,8 @@ class SemanticQueryResolverProtocol(Protocol):
 
 __all__ = [
     "TableName",
+    "WarehouseTableName",
+    "MetricSourceTable",
     "TableType",
     "DimensionType",
     "MetricAggregation",

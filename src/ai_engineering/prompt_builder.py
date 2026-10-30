@@ -181,6 +181,15 @@ def build_prompt(
             "Do NOT join Orders and Predictions row-by-row — Predictions rows are "
             "representative forecast profiles, not one row per historical order."
         )
+        if any(td.name == "Forecast Accuracy" for td in extra_tables.values()):
+            # v3.3: the backtest view already pairs actual and predicted
+            # Sales per month, so accuracy questions need no comparison SQL.
+            rules = (
+                f"{rules}\n"
+                '- For model accuracy/error questions (predicted vs actual, error, '
+                'WAPE, bias, backtest), query "Forecast Accuracy" alone: each row '
+                "already holds actual and predicted Sales for one month/Region/Category."
+            )
     prompt_parts.append(rules)
     prompt_parts.append("")
     prompt_parts.append(f"User question: {question.text}")
@@ -209,7 +218,9 @@ def _render_semantic_block(layer: SemanticLayerDocument) -> str:
         formula = m.formula_sql
         if len(formula) > 200:
             formula = formula[:197] + "..."
-        lines.append(f"- {m.name} = {formula} — {desc}")
+        # v3.3: metrics over warehouse tables must not be applied to Orders.
+        source = f' [FROM "{m.source_table}"]' if m.source_table != "Orders" else ""
+        lines.append(f"- {m.name}{source} = {formula} — {desc}")
         if m.uses_returns:
             lines.append(
                 f"    (This metric uses Returns via ORDER_ID EXISTS; see joins below.)"
