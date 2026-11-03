@@ -113,8 +113,8 @@ h2, h3 { font-family: 'Space Grotesk', 'Inter', sans-serif !important; letter-sp
   box-shadow: 0 0 0 3px rgba(47, 105, 255, 0.22);
 }
 
-/* boton primario */
-.stButton > button {
+/* boton primario (Consultar) */
+.stButton > button[kind="primary"] {
   background: var(--accent);
   color: #FFFFFF;
   border: none;
@@ -124,8 +124,24 @@ h2, h3 { font-family: 'Space Grotesk', 'Inter', sans-serif !important; letter-sp
   padding: 0.6rem 1.6rem;
   transition: transform 140ms ease, filter 140ms ease;
 }
-.stButton > button:hover { filter: brightness(1.12); transform: translateY(-1px); }
-.stButton > button:active { transform: translateY(0); }
+.stButton > button[kind="primary"]:hover { filter: brightness(1.12); transform: translateY(-1px); }
+.stButton > button[kind="primary"]:active { transform: translateY(0); }
+
+/* chips de ejemplo (botones secundarios) */
+.stButton > button[kind="secondary"] {
+  background: var(--panel);
+  color: var(--muted);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  font-family: 'Inter', sans-serif;
+  font-size: 0.8rem;
+  padding: 0.25rem 0.8rem;
+  transition: border-color 140ms ease, color 140ms ease;
+}
+.stButton > button[kind="secondary"]:hover {
+  border-color: var(--accent);
+  color: var(--ink);
+}
 
 /* codigo SQL */
 code, pre, [data-testid="stCode"] * { font-family: 'IBM Plex Mono', monospace !important; }
@@ -212,13 +228,63 @@ st.markdown(
 
 # ---------- sidebar ----------
 
+def _conn_info() -> str:
+    return (
+        f"host={os.environ.get('POSTGRES_HOST', 'localhost')} "
+        f"port={os.environ.get('POSTGRES_PORT', '5432')} "
+        f"dbname={os.environ.get('POSTGRES_DB', 'global_superstore')} "
+        f"user={os.environ.get('POSTGRES_USER', 'plataforma')} "
+        f"password={os.environ.get('POSTGRES_PASSWORD', 'plataforma_dev')}"
+    )
+
+
+@st.cache_data(ttl=300)
+def _load_people() -> list[tuple[str, str]]:
+    """[(persona, region)] desde la tabla People, para el selector de usuario."""
+    with psycopg.connect(_conn_info()) as conn, conn.cursor() as cur:
+        cur.execute('SELECT "Person", "Region" FROM "People" ORDER BY "Person"')
+        return [(r[0], r[1]) for r in cur.fetchall()]
+
+
+@st.cache_data(ttl=60)
+def _semantic_model_info() -> tuple[str, str]:
+    """(content_version, hash corto) del modelo Ossie activo."""
+    import json as _json
+
+    from src.data_engineering.semantic_layer.ossie import conversion_report, read_ossie_document
+
+    text = read_ossie_document(Path(__file__).with_name("semantic") / "sales.ossie.yaml")
+    version = "?"
+    try:
+        import yaml as _yaml
+
+        raw = _yaml.safe_load(text)
+        for ext in raw.get("custom_extensions", []):
+            data = _json.loads(ext.get("data", "{}"))
+            if "content_version" in data:
+                version = data["content_version"]
+    except Exception:
+        pass
+    return version, conversion_report(text).model_sha256[:12]
+
+
 with st.sidebar:
     st.markdown('<div class="eyebrow" style="margin-top:0.6rem;">Gobierno de datos</div>', unsafe_allow_html=True)
-    viewer = st.text_input(
-        "Usuario",
-        value="marilene_rousseau",
-        help="Persona de la tabla People. Sus regiones asignadas delimitan los datos que puede consultar.",
-    )
+    try:
+        people = _load_people()
+        viewer = st.selectbox(
+            "Usuario",
+            options=[p for p, _ in people],
+            index=next((i for i, (p, _) in enumerate(people) if "Rousseau" in p), 0),
+            format_func=lambda p: f"{p} — {dict(people)[p]}",
+            help="Persona de la tabla People. Su región delimita los datos que puede consultar (RLS).",
+        )
+    except Exception:
+        viewer = st.text_input(
+            "Usuario",
+            value="marilene_rousseau",
+            help="Persona de la tabla People. Sus regiones asignadas delimitan los datos que puede consultar.",
+        )
     st.markdown('<div class="eyebrow" style="margin-top:1.4rem;">Análisis</div>', unsafe_allow_html=True)
     explain = st.checkbox(
         "Explicar los resultados",
@@ -238,14 +304,42 @@ with st.sidebar:
         f'style="color:{ACCENT}; text-decoration:none;">Abrir Metabase</a></div>',
         unsafe_allow_html=True,
     )
+    try:
+        _version, _hash = _semantic_model_info()
+        st.markdown(
+            '<div class="eyebrow" style="margin-top:1.6rem;">Modelo semántico</div>'
+            f'<div style="font-size:0.78rem; color:#9AA1AB;">Apache Ossie · '
+            f'sales v{_version}<br>hash <span style="font-family:monospace;">{_hash}</span></div>',
+            unsafe_allow_html=True,
+        )
+    except Exception:
+        pass
 
 # ---------- pregunta ----------
+
+_EJEMPLOS = [
+    "ventas netas por categoría",
+    "evolución de las ventas mes a mes",
+    "qué ventas predice el modelo por categoría",
+    "qué precisión tiene el forecast del modelo",
+    "países donde perdemos dinero",
+]
+
+
+def _usar_ejemplo(texto: str) -> None:
+    st.session_state["question_input"] = texto
+
 
 question = st.text_input(
     "Tu pregunta",
     placeholder="Ejemplo: evolución de las ventas mes a mes",
+    key="question_input",
 )
-run = st.button("Consultar")
+_cols = st.columns(len(_EJEMPLOS))
+for _col, _ej in zip(_cols, _EJEMPLOS):
+    with _col:
+        st.button(_ej, key=f"ej_{_ej}", on_click=_usar_ejemplo, args=(_ej,), width="stretch")
+run = st.button("Consultar", type="primary")
 
 # ---------- explicacion de resultados ----------
 
@@ -338,14 +432,7 @@ if run and question.strip():
         st.stop()
 
     tracker_slot.markdown(_tracker(2), unsafe_allow_html=True)
-    conn_info = (
-        f"host={os.environ.get('POSTGRES_HOST', 'localhost')} "
-        f"port={os.environ.get('POSTGRES_PORT', '5432')} "
-        f"dbname={os.environ.get('POSTGRES_DB', 'global_superstore')} "
-        f"user={os.environ.get('POSTGRES_USER', 'plataforma')} "
-        f"password={os.environ.get('POSTGRES_PASSWORD', 'plataforma_dev')}"
-    )
-    with psycopg.connect(conn_info) as conn, conn.cursor() as cur:
+    with psycopg.connect(_conn_info()) as conn, conn.cursor() as cur:
         cur.execute(sql)
         columns = [d.name for d in cur.description or []]
         rows = cur.fetchall()
@@ -411,12 +498,7 @@ if last:
         f'<div class="section-label">Resultados &middot; {len(rows)} filas</div>',
         unsafe_allow_html=True,
     )
-    if all(value is None for r in rows for value in r):
-        # 0 filas o un agregado todo NULL: p. ej. un forecast sin perfiles
-        # para la region del usuario.
-        st.info("Sin datos para esta pregunta dentro del alcance de tu región.")
-    else:
-        st.dataframe([dict(zip(columns, r)) for r in rows], width="stretch")
+    st.dataframe([dict(zip(columns, r)) for r in rows], width="stretch")
 
     if len(columns) >= 2 and rows:
         import pandas as pd
