@@ -47,6 +47,13 @@ class SchemaProvider(Protocol):
         """Check whether a table exists in the warehouse schema."""
         ...
 
+    def create_or_replace_view(self, name: str, select_sql: str) -> None:
+        """Materialize (or redefine) a read-only view from a trusted SELECT.
+
+        `select_sql` is platform-authored DDL input, never LLM output.
+        """
+        ...
+
 
 @runtime_checkable
 class DataProvider(Protocol):
@@ -77,6 +84,14 @@ class DataProvider(Protocol):
 
     def count_rows(self, table_name: str) -> int:
         """Return the row count of a table (used by the validator)."""
+        ...
+
+    def delete_rows_where(self, table_name: str, column: str, value: str) -> int:
+        """Delete the rows whose `column` equals `value`; returns how many.
+
+        Platform maintenance only (e.g. re-scoring one backtest run), never a
+        path for generated SQL.
+        """
         ...
 
     def list_tables(self) -> list[str]:

@@ -108,7 +108,9 @@ def model_context(model_raw: dict) -> tuple[str, str, set[str]]:
     for m in model_raw.get("metrics", []):
         names.add(m["name"])
         expr = m["expression"]["dialects"][0]["expression"]
-        met_lines.append(f"- {m['name']}: {expr}  — {m['description']}")
+        profile = json.loads(m["custom_extensions"][0]["data"])
+        source = profile.get("source_table", "Orders")
+        met_lines.append(f"- {m['name']} [FROM \"{source}\"]: {expr}  — {m['description']}")
     return "\n".join(cols_lines), "\n".join(met_lines), names
 
 
@@ -135,20 +137,24 @@ REGLAS ESTRICTAS:
 1. Solo metricas calculables con las columnas fisicas listadas. Si el documento \
 pide algo que requiere columnas o tablas nuevas, NO lo propongas como metrica: \
 ponlo en out_of_scope con su motivo (requiere ingestion/diccionario/contratos).
-2. expression: UNA expresion agregada escalar en SQL PostgreSQL sobre la tabla \
-"Orders", con las columnas fisicas entre comillas dobles (ej: SUM("Sales")). \
-La tabla Returns solo via EXISTS (SELECT 1 FROM Returns WHERE Returns."Order ID" \
-= Orders."Order ID"). Sin GROUP BY, sin WHERE, sin alias AS.
+2. expression: UNA expresion agregada escalar en SQL PostgreSQL sobre UNA sola \
+tabla, la indicada en source_table ("Orders", "Predictions" o "Forecast \
+Accuracy"), con sus columnas fisicas entre comillas dobles (ej: SUM("Sales")). \
+No mezcles columnas de tablas distintas. La tabla Returns solo desde "Orders" y \
+via EXISTS (SELECT 1 FROM Returns WHERE Returns."Order ID" = Orders."Order ID"). \
+Sin GROUP BY, sin WHERE, sin alias AS.
 3. name en snake_case, distinto de las metricas existentes.
 4. NO deduzcas una formula solo porque exista una columna: si hay ambiguedad de \
 negocio (ej: si un coste ya esta incluido en "Profit"), declara el supuesto en \
 "assumption" y la pregunta a negocio en "questions".
-5. derives_from: solo nombres de metricas EXISTENTES de la lista (o [] si ninguna).
+5. derives_from: solo nombres de metricas EXISTENTES de la lista o propuestas en \
+esta misma respuesta (o [] si ninguna).
 6. aggregation: SUM, AVG, COUNT_DISTINCT, RATIO o EXPRESSION. RATIO exige que \
-derives_from tenga EXACTAMENTE 2 metricas existentes; ante la duda usa EXPRESSION.
+derives_from tenga EXACTAMENTE 2 metricas; ante la duda usa EXPRESSION.
 
 Responde SOLO con JSON valido (sin markdown, sin comentarios):
 {{"proposals": [{{"name": str, "description": str (ingles, estilo de las actuales),
+"source_table": "Orders" | "Predictions" | "Forecast Accuracy",
 "expression": str, "aggregation": str, "derives_from": [str], "uses_returns": bool,
 "assumption": str o null, "rationale": str (castellano, maximo 2 frases),
 "questions": [str] (castellano, max 1 pregunta corta)}}],
@@ -192,7 +198,7 @@ def metric_block(p: dict) -> dict:
         "execution_dialect": "postgres",
         "portability": "platform-profile",
         "profile_version": 1,
-        "source_table": "Orders",
+        "source_table": p.get("source_table", "Orders"),
         "uses_returns": bool(p.get("uses_returns", False)),
     }
     return {
@@ -218,6 +224,10 @@ def main() -> None:
         read_ossie_document,
         serialize_ossie_yaml,
     )
+    from src.mlops.predictions_store import forecast_semantic_tables
+
+    # Tablas del warehouse (no vienen del workbook) que el modelo puede declarar.
+    warehouse_tables = forecast_semantic_tables()
 
     print(f"[1/5] Leyendo documento de negocio: {doc_path.name}")
     document_text = read_input_document(doc_path)
@@ -247,7 +257,7 @@ def main() -> None:
             base["metrics"].append(metric_block(p))
         candidate_text = yaml.safe_dump(base, sort_keys=False, allow_unicode=True, width=100)
         try:
-            import_ossie(candidate_text, dictionary)
+            import_ossie(candidate_text, dictionary, warehouse_tables)
             break
         except Exception as exc:
             if fix_round == 2:
@@ -260,7 +270,8 @@ def main() -> None:
                 f"Propuestas actuales:\n{json.dumps(proposals, ensure_ascii=False)}\n\n"
                 "Corrige SOLO lo necesario para superar la validacion, manteniendo la "
                 "intencion de negocio. Recuerda: RATIO exige exactamente 2 metricas "
-                "existentes en derives_from; ante la duda usa EXPRESSION. Responde SOLO "
+                "existentes en derives_from; ante la duda usa EXPRESSION; cada metrica "
+                "usa solo columnas de su source_table. Responde SOLO "
                 "con el JSON corregido con el mismo esquema {\"proposals\": [...], "
                 "\"out_of_scope\": [...]}."
             )
@@ -283,6 +294,7 @@ def main() -> None:
     print("=" * 72)
     for p in proposals:
         print(f"METRICA PROPUESTA: {p['name']}")
+        print(f"  tabla      : {p.get('source_table', 'Orders')}")
         print(f"  formula    : {p['expression']}")
         print(f"  descripcion: {p['description']}")
         print(f"  por que    : {p.get('rationale', '-')}")

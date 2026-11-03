@@ -128,6 +128,41 @@ class DashboardItem(BaseModel):
     dashboard_id: int
 
 
+class DashcardPlacement(BaseModel):
+    """Where a card sits on a dashboard grid (Metabase uses 24 columns).
+
+    v3.3: used by `MetabaseClient.set_dashboard_cards` to lay out scripted
+    dashboards in one `PUT /api/dashboard/{id}` call.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    # None for virtual dashcards (text/heading) kept from the current layout.
+    card_id: int | None
+    row: int = Field(ge=0)
+    col: int = Field(ge=0, le=23)
+    size_x: int = Field(ge=1, le=24)
+    size_y: int = Field(ge=1)
+    # An existing dashcard kept in a new layout keeps its id and settings;
+    # new dashcards leave these empty.
+    dashcard_id: int | None = None
+    visualization_settings: dict[str, object] = Field(default_factory=dict)
+    parameter_mappings: list[dict[str, object]] = Field(default_factory=list)
+
+
+class DashboardCardRef(BaseModel):
+    """A dashcard currently on a dashboard, read back from Metabase (v3.3).
+
+    `description` is the description of the card behind it, which scripted
+    dashboards use to recognise the cards they created themselves.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    placement: DashcardPlacement
+    description: str | None = None
+
+
 class Dashboard(BaseModel):
     """A Metabase dashboard aggregating multiple cards."""
 
@@ -161,6 +196,8 @@ __all__ = [
     "Card",
     "Collection",
     "DashboardItem",
+    "DashboardCardRef",
+    "DashcardPlacement",
     "Dashboard",
     "MetabaseSession",
 ]

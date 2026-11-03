@@ -411,7 +411,12 @@ if last:
         f'<div class="section-label">Resultados &middot; {len(rows)} filas</div>',
         unsafe_allow_html=True,
     )
-    st.dataframe([dict(zip(columns, r)) for r in rows], width="stretch")
+    if all(value is None for r in rows for value in r):
+        # 0 filas o un agregado todo NULL: p. ej. un forecast sin perfiles
+        # para la region del usuario.
+        st.info("Sin datos para esta pregunta dentro del alcance de tu región.")
+    else:
+        st.dataframe([dict(zip(columns, r)) for r in rows], width="stretch")
 
     if len(columns) >= 2 and rows:
         import pandas as pd

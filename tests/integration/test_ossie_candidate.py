@@ -15,6 +15,7 @@ from src.data_engineering.eda.explorer import explore_workbook
 from src.data_engineering.eda.schema_inferrer import infer_table_defs
 from src.data_engineering.ingestion.manifest import sha256_of_file
 from src.data_engineering.semantic_layer.ossie import canonicalize_ossie, export_ossie, import_ossie
+from src.mlops.predictions_store import forecast_semantic_tables
 from tests.semantic_fixtures import _load_legacy_semantic_layer
 
 
@@ -35,13 +36,28 @@ def test_candidate_matches_legacy_and_real_primary_keys() -> None:
     )
     legacy = _load_legacy_semantic_layer()
     text = (root / "semantic/sales.ossie.yaml").read_text()
-    restored = import_ossie(text, dictionary)
-    assert canonicalize_ossie(text) == export_ossie(legacy, dictionary)
-    assert {metric.name: metric for metric in restored.metrics} == {metric.name: metric for metric in legacy.metrics}
-    assert {dim.name: dim for dim in restored.dimensions} == {dim.name: dim for dim in legacy.dimensions}
+    warehouse = forecast_semantic_tables()
+    restored = import_ossie(text, dictionary, warehouse)
+    # v3.3 added warehouse datasets/forecast metrics and bumped content_version;
+    # the workbook projection must still be exactly the legacy one.
     raw = json.loads(canonicalize_ossie(text))
+    workbook_only = {
+        **raw,
+        "datasets": [dataset for dataset in raw["datasets"] if dataset["name"] not in warehouse],
+        "metrics": [metric for metric in raw["metrics"]
+                    if json.loads(metric["custom_extensions"][0]["data"])["source_table"] == "Orders"],
+    }
+    profile = json.loads(workbook_only["custom_extensions"][0]["data"])
+    workbook_only["custom_extensions"] = [{
+        **workbook_only["custom_extensions"][0],
+        "data": json.dumps({**profile, "content_version": legacy.version}),
+    }]
+    assert canonicalize_ossie(json.dumps(workbook_only)) == export_ossie(legacy, dictionary)
+    orders_metrics = {metric.name: metric for metric in restored.metrics if metric.source_table == "Orders"}
+    assert orders_metrics == {metric.name: metric for metric in legacy.metrics}
+    assert {dim.name: dim for dim in restored.dimensions} == {dim.name: dim for dim in legacy.dimensions}
     declared: dict[str, list[str]] = {}
-    for dataset in raw["datasets"]:
+    for dataset in workbook_only["datasets"]:
         physical = {
             field["name"]: json.loads(field["custom_extensions"][0]["data"])["physical_column"]
             for field in dataset["fields"]

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import datetime, timezone
 from hashlib import sha256
 from importlib.resources import files
@@ -46,6 +47,7 @@ from src.contracts.semantic_layer import (
     SemanticLayerDocument,
     SemanticModelProvenance,
     TableSemanticClassification,
+    TableType,
 )
 
 
@@ -161,11 +163,24 @@ def _logical_name(column: str) -> str:
     return re.sub(r"[^a-z0-9]+", "_", column.lower()).strip("_")
 
 
-def export_ossie(layer: SemanticLayerDocument, dictionary: DataDictionaryDocument) -> str:
-    """Export a typed consumption projection without changing its definitions."""
+def export_ossie(
+    layer: SemanticLayerDocument,
+    dictionary: DataDictionaryDocument,
+    warehouse_tables: Mapping[str, TableDef] | None = None,
+) -> str:
+    """Export a typed consumption projection without changing its definitions.
+
+    `warehouse_tables` supplies the schema of warehouse-managed datasets
+    (e.g. Predictions) that the workbook dictionary does not describe.
+    """
+    warehouse = dict(warehouse_tables or {})
     datasets: list[OssieDataset] = []
     for table in layer.tables:
         source = next((item for item in dictionary.tables if item.name == table.name), None)
+        if source is None and table.name in warehouse:
+            datasets.append(_warehouse_dataset(table.name, table.table_type, table.purpose,
+                                               warehouse[table.name]))
+            continue
         if source is None:
             raise ValueError(f"Missing dictionary for {table.name}")
         fields: list[OssieField] = []
@@ -209,8 +224,26 @@ def export_ossie(layer: SemanticLayerDocument, dictionary: DataDictionaryDocumen
         )),
     )
     text = document.to_ossie_json()
-    import_ossie(text, dictionary)
+    import_ossie(text, dictionary, warehouse)
     return canonicalize_ossie(text)
+
+
+def _warehouse_dataset(name: str, table_type: TableType, purpose: str, table_def: TableDef) -> OssieDataset:
+    """Dataset for a warehouse-managed table: physical fields only, no dimensions."""
+    fields = [
+        OssieField(
+            name=_logical_name(column.name),
+            expression=_expression(exp.column(column.name, quoted=True).sql(dialect="postgres")),
+            custom_extensions=_extension(FieldCompatibility(physical_column=column.name)),
+        )
+        for column in table_def.columns
+    ]
+    keys = [_logical_name(column.name) for column in table_def.columns if column.is_primary_key]
+    return OssieDataset(
+        name=name, source=exp.to_identifier(name, quoted=True).sql(), description=purpose,
+        fields=fields, primary_key=keys or None,
+        custom_extensions=_extension(DatasetCompatibility(table_type=table_type)),
+    )
 
 
 def canonicalize_ossie(text: str) -> str:
@@ -257,18 +290,39 @@ def conversion_report(text: str) -> ConversionReport:
                             model_sha256=sha256(canonicalize_ossie(text).encode()).hexdigest())
 
 
-def import_ossie(text: str, dictionary: DataDictionaryDocument) -> SemanticLayerDocument:
+def import_ossie(
+    text: str,
+    dictionary: DataDictionaryDocument,
+    warehouse_tables: Mapping[str, TableDef] | None = None,
+) -> SemanticLayerDocument:
+    """Validate the canonical model against the dictionary and project it.
+
+    `warehouse_tables` (v3.3) admits datasets the workbook dictionary does not
+    describe (e.g. `Predictions`, the `Forecast Accuracy` view). They are
+    optional, but once declared they follow the same completeness rules as
+    dictionary datasets, using the supplied `TableDef` as physical truth.
+    """
     document = _load_document(text)
     root = _profile(document.custom_extensions, ModelCompatibility)
     _unique([association.name for association in root.associations], "compatibility association")
     tables: list[TableSemanticClassification] = []
     dimensions: list[Dimension] = []
     known_columns = {table.name: {column.name for column in table.columns} for table in dictionary.tables}
+    primary_keys = {table.name: set(table.primary_key) for table in dictionary.tables}
+    warehouse = dict(warehouse_tables or {})
+    if set(warehouse) & set(known_columns):
+        raise ValueError("Warehouse tables must not shadow dictionary datasets")
     dataset_fields: dict[str, set[str]] = {}
     dataset_keys: dict[str, list[list[str]]] = {}
     dataset_names = {dataset.name for dataset in document.datasets}
-    if dataset_names != set(known_columns):
+    if not set(known_columns) <= dataset_names:
         raise ValueError("Platform model must declare all dictionary datasets")
+    unknown_datasets = dataset_names - set(known_columns) - set(warehouse)
+    if unknown_datasets:
+        raise ValueError(f"Unknown datasets without a warehouse definition: {sorted(unknown_datasets)}")
+    for name in dataset_names & set(warehouse):
+        known_columns[name] = {column.name for column in warehouse[name].columns}
+        primary_keys[name] = {column.name for column in warehouse[name].columns if column.is_primary_key}
     for dataset in document.datasets:
         if dataset.name not in known_columns or dataset.source != exp.to_identifier(dataset.name, quoted=True).sql():
             raise ValueError(f"Unsupported source for dataset {dataset.name}")
@@ -279,8 +333,7 @@ def import_ossie(text: str, dictionary: DataDictionaryDocument) -> SemanticLayer
         }))
         dataset_fields[dataset.name] = {field.name for field in dataset.fields or []}
         dataset_keys[dataset.name] = ([dataset.primary_key] if dataset.primary_key else []) + (dataset.unique_keys or [])
-        dictionary_table = next(table for table in dictionary.tables if table.name == dataset.name)
-        declared_primary = set(dictionary_table.primary_key)
+        declared_primary = primary_keys[dataset.name]
         physical_by_field: dict[str, str] = {}
         for field in dataset.fields or []:
             field_meta = _profile(field.custom_extensions, FieldCompatibility)
@@ -323,7 +376,9 @@ def import_ossie(text: str, dictionary: DataDictionaryDocument) -> SemanticLayer
     for metric in document.metrics or []:
         meta_metric = _profile(metric.custom_extensions, MetricCompatibility)
         formula = _sql(metric.expression)
-        _validate_formula(formula, known_columns, metric.name)
+        if meta_metric.source_table not in dataset_names:
+            raise ValueError(f"Metric {metric.name} source table {meta_metric.source_table} is not declared")
+        _validate_formula(formula, known_columns, metric.name, meta_metric.source_table)
         metrics.append(Metric(
             name=metric.name, formula_sql=formula, business_description=metric.description or "",
             source_table=meta_metric.source_table, aggregation=meta_metric.aggregation,
@@ -348,9 +403,10 @@ def import_ossie(text: str, dictionary: DataDictionaryDocument) -> SemanticLayer
     )
 
 
-def _validate_formula(formula: str, columns: dict[str, set[str]], name: str) -> None:
+def _validate_formula(formula: str, columns: dict[str, set[str]], name: str, source_table: str = "Orders") -> None:
+    source_sql = exp.to_identifier(source_table, quoted=True).sql()
     try:
-        statements = sqlglot.parse(f'SELECT {formula} FROM "Orders"', read="postgres")
+        statements = sqlglot.parse(f"SELECT {formula} FROM {source_sql}", read="postgres")
     except (ParseError, TokenError, RecursionError) as exc:
         raise ValueError(f"Metric {name} contains invalid or unsupported SQL: {exc}") from exc
     if len(statements) != 1 or not isinstance(statements[0], exp.Select):
@@ -361,25 +417,27 @@ def _validate_formula(formula: str, columns: dict[str, set[str]], name: str) -> 
     if any(value for key, value in tree.args.items() if key not in {"expressions", "from_"}):
         raise ValueError(f"Metric {name} must not alter the enclosing query")
     outer_source = tree.args.get("from_")
-    if not isinstance(outer_source, exp.From) or outer_source.this != exp.to_table('"Orders"'):
+    if not isinstance(outer_source, exp.From) or outer_source.this != exp.to_table(source_sql):
         raise ValueError(f"Metric {name} must not replace the enclosing source")
     validation = validate_sql(
         tree.sql(dialect="postgres"),
-        TableDef(name="Orders", description="Semantic reference validation", columns=[
+        TableDef(name=source_table, description="Semantic reference validation", columns=[
             ColumnDef(name=column, logical_type=LogicalType.STRING, nullable=True)
-            for column in columns["Orders"]
+            for column in columns[source_table]
         ]),
     )
     if not validation.accepted:
         raise ValueError(f"Metric {name}: {validation.reason}")
-    aliases = {"orders": "Orders"}
+    # Returns is only reachable through the Orders-linked EXISTS form.
+    allowed = {source_table, "Returns"} if source_table == "Orders" else {source_table}
+    aliases = {source_table.lower(): source_table}
     for table in tree.find_all(exp.Table):
         match = next((key for key in columns if key.lower() == table.name.lower()), None)
-        if match not in {"Orders", "Returns"} or table.db or table.catalog:
+        if match not in allowed or table.db or table.catalog:
             raise ValueError(f"Metric {name} references unsupported table {table.name}")
         aliases[table.alias_or_name.lower()] = match
     for column in tree.find_all(exp.Column):
-        table_name = aliases.get(column.table.lower(), "Orders") if column.table else "Orders"
+        table_name = aliases.get(column.table.lower(), source_table) if column.table else source_table
         if column.table and column.table.lower() not in aliases:
             raise ValueError(f"Metric {name} references unknown qualifier {column.table}")
         if column.name not in columns[table_name]:
@@ -405,8 +463,17 @@ def _validate_dependencies(metrics: list[Metric]) -> None:
         metric = by_name[name]
         if metric.aggregation == "RATIO" and len(metric.derives_from) != 2:
             raise ValueError(f"Ratio {name} requires exactly two dependencies")
+        # Returns is only reachable from Orders (see `_validate_formula`).
+        if metric.uses_returns and metric.source_table != "Orders":
+            raise ValueError(f"Metric {name} on {metric.source_table} cannot use Returns")
         for parent in metric.derives_from:
             visit(parent)
+            # A derived metric is evaluated over one table; no cross-table lineage.
+            if by_name[parent].source_table != metric.source_table:
+                raise ValueError(
+                    f"Metric {name} on {metric.source_table} cannot derive from "
+                    f"{parent} on {by_name[parent].source_table}"
+                )
         active.remove(name)
         visited.add(name)
     for name in by_name:

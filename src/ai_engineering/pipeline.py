@@ -22,6 +22,7 @@ from src.contracts.data_access import TableDef
 from src.contracts.dictionary import DataDictionaryDocument
 from src.contracts.semantic_layer import SemanticLayerDocument, SemanticViewer
 from src.contracts.text_to_sql import (
+    ForecastScope,
     GeneratedSql,
     GovernedExecutionProvider,
     LlmConfig,
@@ -116,6 +117,7 @@ class TextToSqlPipeline:
         viewer: SemanticViewer | None = None,
         on_query_complete: OnQueryComplete | None = None,
         extra_tables: dict[str, TableDef] | None = None,
+        forecast_scope: ForecastScope | None = None,
     ) -> None:
         self._dictionary = dictionary
         self._table_def = table_def
@@ -141,6 +143,8 @@ class TextToSqlPipeline:
         # still reference on their own. Threaded into both `build_prompt`
         # (schema visibility) and `validate_sql` (table/column allowlisting).
         self._extra_tables = extra_tables
+        # v3.3: active model run the prompt scopes forecast tables to.
+        self._forecast_scope = forecast_scope
 
     def execute_reference_sql(self, sql: str) -> list[QueryRow]:
         """Execute an evaluation reference with the same access, without LLM or sink."""
@@ -163,6 +167,7 @@ class TextToSqlPipeline:
             table_def=self._table_def,
             semantic_layer=self._semantic_layer,
             extra_tables=self._extra_tables,
+            forecast_scope=self._forecast_scope,
         )
 
         # 2. Call the LLM.

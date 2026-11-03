@@ -9,8 +9,9 @@ from src.contracts.data_access import ColumnDef, ForeignKeyDef, LogicalType, Tab
 from src.contracts.dictionary import (
     DataDictionaryDocument, DictionaryEntry, RelationshipEntry, TableDictionary,
 )
-from src.contracts.semantic_layer import SemanticLayerDocument
+from src.contracts.semantic_layer import Metric, SemanticLayerDocument
 from src.data_engineering.semantic_layer.ossie import import_ossie, read_ossie_document
+from src.mlops.predictions_store import forecast_semantic_tables
 
 
 LEGACY_REVISION = "f465e4832291422f396ef1794101c91965a1e395"
@@ -111,7 +112,13 @@ def _canonical_model_text() -> str:
 def _load_test_semantic_layer(dictionary: DataDictionaryDocument | None = None) -> SemanticLayerDocument:
     if dictionary is None:
         dictionary = _build_test_dictionary(_build_test_table_defs())
-    return import_ossie(_canonical_model_text(), dictionary)
+    return import_ossie(_canonical_model_text(), dictionary, forecast_semantic_tables())
+
+
+def _orders_metrics(layer: SemanticLayerDocument) -> list[Metric]:
+    """Metrics evaluated over Orders: the set the legacy reference covers (v3.3
+    forecast metrics live on Predictions / Forecast Accuracy)."""
+    return [metric for metric in layer.metrics if metric.source_table == "Orders"]
 
 
 def _load_legacy_semantic_layer() -> SemanticLayerDocument:

@@ -24,7 +24,7 @@ from __future__ import annotations
 from src.contracts.data_access import TableDef
 from src.contracts.dictionary import DataDictionaryDocument
 from src.contracts.semantic_layer import SemanticLayerDocument
-from src.contracts.text_to_sql import NLQuestion
+from src.contracts.text_to_sql import ForecastScope, NLQuestion
 
 _SYSTEM_INSTRUCTION = (
     "You are a data analyst assistant. Translate the user's natural-language "
@@ -63,6 +63,7 @@ def build_prompt(
     table_def: TableDef,
     semantic_layer: SemanticLayerDocument | None = None,
     extra_tables: dict[str, TableDef] | None = None,
+    forecast_scope: ForecastScope | None = None,
 ) -> str:
     """Build the LLM prompt from the dictionary + (optional) semantic layer + NL question.
 
@@ -181,6 +182,35 @@ def build_prompt(
             "Do NOT join Orders and Predictions row-by-row — Predictions rows are "
             "representative forecast profiles, not one row per historical order."
         )
+        if any(td.name == "Forecast Accuracy" for td in extra_tables.values()):
+            # v3.3: the backtest view already pairs actual and predicted
+            # Sales per month, so accuracy questions need no comparison SQL.
+            rules = (
+                f"{rules}\n"
+                '- For model accuracy/error questions (predicted vs actual, error, '
+                'WAPE, bias, backtest), query "Forecast Accuracy" alone: each row '
+                "already holds actual and predicted Sales for one month/Region/Category."
+            )
+        extra_names = {td.name for td in extra_tables.values()}
+        if "Predictions" in extra_names:
+            rules = (
+                f"{rules}\n"
+                '- "Predicted Sales" is the forecast of ONE representative order line, '
+                'not a sales total: answer predicted sales/ticket questions with AVG("Predicted '
+                'Sales") and never present SUM("Predicted Sales") as a monthly or regional total.'
+            )
+        if forecast_scope is not None and extra_names & {"Predictions", "Forecast Accuracy"}:
+            # v3.3: both tables accumulate every model run; without a filter
+            # an answer silently mixes models once the model is retrained.
+            run = forecast_scope.run_id.replace("'", "''")
+            env = forecast_scope.environment.replace("'", "''")
+            rules = (
+                f"{rules}\n"
+                "- Forecast tables hold rows from several model runs. Unless the question "
+                "explicitly compares runs or environments, ALWAYS filter "
+                f'"Predictions" with "Environment" = \'{env}\' AND "Run ID" = \'{run}\', and '
+                f'"Forecast Accuracy" with "Run ID" = \'{run}\' (the active model).'
+            )
     prompt_parts.append(rules)
     prompt_parts.append("")
     prompt_parts.append(f"User question: {question.text}")
@@ -209,7 +239,9 @@ def _render_semantic_block(layer: SemanticLayerDocument) -> str:
         formula = m.formula_sql
         if len(formula) > 200:
             formula = formula[:197] + "..."
-        lines.append(f"- {m.name} = {formula} — {desc}")
+        # v3.3: metrics over warehouse tables must not be applied to Orders.
+        source = f' [FROM "{m.source_table}"]' if m.source_table != "Orders" else ""
+        lines.append(f"- {m.name}{source} = {formula} — {desc}")
         if m.uses_returns:
             lines.append(
                 f"    (This metric uses Returns via ORDER_ID EXISTS; see joins below.)"

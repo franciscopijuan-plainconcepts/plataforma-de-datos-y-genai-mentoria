@@ -47,6 +47,7 @@ from src.data_engineering.ingestion.manifest import (
 
 if TYPE_CHECKING:
     from src.contracts.dictionary import DataDictionaryDocument
+    from src.contracts.text_to_sql import ForecastScope
     from src.ai_engineering.pipeline import TextToSqlPipeline
     # Avoid top-level import cycle: MetabaseSession is used only in type hints
     # of private helpers that are invoked after the runtime import inside the
@@ -169,8 +170,35 @@ def _info(msg: str) -> None:
     print(msg)
 
 
+def _forecast_extra_tables() -> dict[str, TableDef]:
+    """Warehouse datasets queryable next to Orders (`Predictions`, `Forecast
+    Accuracy`), keyed by lowercase name as the SQL validator/RLS look them up."""
+    from src.mlops.predictions_store import forecast_semantic_tables
+
+    return {name.lower(): table_def for name, table_def in forecast_semantic_tables().items()}
+
+
+def _active_forecast_scope() -> "ForecastScope | None":
+    """Best-effort: the model run active in SEED_SALES_PREDICTIONS_ENV, so NL
+    answers over the forecast tables don't mix runs. None when unavailable."""
+    from src.contracts.text_to_sql import ForecastScope
+
+    environment = os.environ.get("SEED_SALES_PREDICTIONS_ENV", "prod")
+    try:
+        from src.mlops.registry import ArtifactRegistry
+
+        active = ArtifactRegistry().resolve_active_run(cast("Any", environment))
+    except Exception as exc:
+        _info(f"WARNING: active forecast run unavailable, forecast answers are not run-scoped: {exc}")
+        return None
+    if active is None:
+        return None
+    return ForecastScope(run_id=active.run_id, environment=environment)
+
+
 def _load_semantic_context() -> tuple["DataDictionaryDocument", TableDef, "SemanticLayerDocument", str]:
     from src.data_engineering.semantic_layer.ossie import import_ossie, read_ossie_document
+    from src.mlops.predictions_store import forecast_semantic_tables
 
     try:
         text = read_ossie_document(_OSSIE_MODEL_PATH)
@@ -191,7 +219,7 @@ def _load_semantic_context() -> tuple["DataDictionaryDocument", TableDef, "Seman
         _err("Orders table not found in inferred schema.")
     document = generate_dictionary(inference, table_defs)
     try:
-        semantic_doc = import_ossie(text, document)
+        semantic_doc = import_ossie(text, document, forecast_semantic_tables())
     except ValueError as exc:
         _err(f"Canonical Ossie model {_OSSIE_MODEL_PATH} is incompatible: {exc}. No legacy fallback is enabled.")
     if semantic_doc.provenance is None:
@@ -278,9 +306,13 @@ def cmd_bootstrap(source_file: str | None = None) -> None:
         # Historic log of predict-sales calls (empty at bootstrap time —
         # populated as predictions are made). Created up-front so it shows
         # up in `validate`/`list_tables` immediately after bootstrap.
-        from src.mlops.predictions_store import ensure_predictions_table
+        from src.mlops.predictions_store import ensure_backtest_objects, ensure_predictions_table
 
         ensure_predictions_table(repo)
+        # v3.3: same for `Forecast Backtest` + the `Forecast Accuracy` view —
+        # `ask` and the forecast dashboard always expose the view, so it must
+        # exist even when the (best-effort) backtest below is skipped or fails.
+        ensure_backtest_objects(repo)
 
         # --- Seed future Sales predictions (v3.1, POC groundwork) ---
         # Best-effort + non-fatal: bootstrap MUST still succeed (baseline
@@ -289,7 +321,18 @@ def cmd_bootstrap(source_file: str | None = None) -> None:
         # pending). Disable entirely with SEED_SALES_PREDICTIONS=false;
         # re-run/force manually anytime with `seed-sales-predictions`.
         if os.environ.get("SEED_SALES_PREDICTIONS", "true").lower() != "false":
-            _seed_sales_predictions(repo)
+            # Orders schema of the workbook actually being loaded (honors
+            # --source): re-inferring the default workbook inside the helpers
+            # could `_err` (SystemExit) and abort a best-effort step.
+            orders_def = next((td for td in infer_table_defs(tables) if td.name == "Orders"), None)
+            if orders_def is None:
+                _info("WARNING: Orders not found in the loaded workbook — skipping seeding and backtest.")
+            else:
+                _seed_sales_predictions(repo, orders_def)
+                # v3.3: backtest the active run so `Forecast Accuracy` has data.
+                # Same best-effort contract; disable with SEED_FORECAST_BACKTEST=false.
+                if os.environ.get("SEED_FORECAST_BACKTEST", "true").lower() != "false":
+                    _run_forecast_backtest(repo, orders_def)
 
     # --- Manifest provenance ---
     manifest = build_manifest(inference, load_results)
@@ -299,7 +342,7 @@ def cmd_bootstrap(source_file: str | None = None) -> None:
     _info("Bootstrap complete. Run `validate` to confirm.")
 
 
-def _seed_sales_predictions(repo: PostgresRepository, force: bool = False) -> None:
+def _seed_sales_predictions(repo: PostgresRepository, orders_def: TableDef, force: bool = False) -> None:
     """Best-effort: train/promote a model if needed, then populate
     `Predictions` with deterministic forecasts for the next months (no
     LLM involved — see `src/mlops/seed_predictions.py`). Never raises;
@@ -311,7 +354,6 @@ def _seed_sales_predictions(repo: PostgresRepository, force: bool = False) -> No
         from src.mlops.registry import ArtifactRegistry
         from src.mlops.seed_predictions import seed_future_predictions
 
-        orders_def = _infer_orders_table_def()
         registry = ArtifactRegistry()
         _info(f"Seeding future Sales predictions (env={environment}, months_ahead={months_ahead})...")
         written = seed_future_predictions(
@@ -328,6 +370,24 @@ def _seed_sales_predictions(repo: PostgresRepository, force: bool = False) -> No
             _info("Future predictions already present for the active model — skipped (use --force to reseed).")
     except Exception as exc:
         _info(f"WARNING: seeding future Sales predictions failed (non-fatal): {exc}")
+
+
+def _run_forecast_backtest(repo: PostgresRepository, orders_def: TableDef) -> None:
+    """Best-effort: backtest the run active in the seeding environment into
+    `Forecast Backtest` (see `src/mlops/backtest.py`). Never raises."""
+    environment = os.environ.get("SEED_SALES_PREDICTIONS_ENV", "prod")
+    try:
+        from src.mlops.backtest import run_backtest
+        from src.mlops.registry import ArtifactRegistry
+
+        _info(f"Backtesting the active sales model on its holdout (env={environment})...")
+        written = run_backtest(repo, orders_def, ArtifactRegistry(), environment=cast("Any", environment))
+        if written:
+            _info(f"Scored {written} holdout order lines into 'Forecast Backtest' (env={environment}).")
+        else:
+            _info("Active model already backtested — skipped.")
+    except Exception as exc:
+        _info(f"WARNING: forecast backtest failed (non-fatal): {exc}")
 
 
 def cmd_teardown(remove_volume: bool | None = None) -> None:
@@ -515,9 +575,14 @@ def cmd_ask(
             print(f"Execution error: {response.query_result.error}")
             print(f"  SQL: {response.query_result.sql}")
         else:
+            rows = response.query_result.rows
             print(f"Rows ({response.query_result.row_count}):")
-            for row in response.query_result.rows:
-                print(f"  {row.data}")
+            if all(not row.data for row in rows):
+                # The adapter drops NULL values, so an empty aggregate prints `{}`.
+                print("  (no data for this question in the viewer's scope)")
+            else:
+                for row in rows:
+                    print(f"  {row.data}")
             print(f"Latency: {response.query_result.latency_ms}ms")
 
 
@@ -534,36 +599,12 @@ def _run_ask_pipeline(
         return pipeline.run(NLQuestion(text=question)), viewer
 
 
-@contextmanager
-def _compose_ask_pipeline(
-    viewer_id: str | None,
-    allow_full_access: bool,
-    metabase_enabled: bool = False,
-    session_id: str | None = None,
-) -> Iterator[tuple["TextToSqlPipeline", "SemanticViewer"]]:
-    """One composition for ask, chart and evaluation; one model load per operation."""
-    from src.ai_engineering.llm_client import LlmClient
-    from src.ai_engineering.pipeline import TextToSqlPipeline
+def _resolve_viewer(
+    viewer_id: str | None, allow_full_access: bool, config: PostgresConfig,
+) -> "SemanticViewer":
+    """Governance context shared by ask/chart/evaluate and scripted dashboards."""
     from src.contracts.semantic_layer import SemanticViewer
-    from src.contracts.text_to_sql import LlmConfig, TextToSqlResponse
-    from src.data_engineering.semantic_layer.governed_provider import (
-        build_governed_provider,
-    )
     from src.data_engineering.semantic_layer.registry import ViewerRegistry
-    from src.data_engineering.semantic_layer.resolver import SemanticQueryResolver
-
-    document, orders_def, semantic_doc, _model_text = _load_semantic_context()
-
-    # --- Fail-fast checks (FR-013) ---
-    try:
-        llm_config = LlmConfig.from_env()
-    except ValueError as exc:
-        _err(str(exc))
-
-    if not _docker_available():
-        _err("Docker is not running. Run `bootstrap` first to start the warehouse.")
-
-    config = PostgresConfig.from_env()
 
     # --- Resolve the viewer (governance context) ---
     # v2.0 "login as a person" model: try the People table first (the canonical
@@ -610,19 +651,22 @@ def _compose_ask_pipeline(
                     f"regions={list(viewer.regions)} "
                     f"allows_full_access={viewer.allows_full_access}"
                 )
-            except FileNotFoundError as exc:
-                _err(str(exc))
-            except ValueError as exc:
-                # No match in People nor viewers.yaml — list both sources.
+            except (FileNotFoundError, ValueError) as exc:
+                # No match in People nor viewers.yaml (or no viewers.yaml at
+                # all, the usual case): the person is unknown — say so and list
+                # the real people instead of only reporting the missing file.
                 try:
                     available_people = people_resolver.list_available()
                 except Exception:
                     available_people = []
+                hint = (
+                    "No viewers.yaml exists for escape-hatch viewers (copy viewers.example.yaml)."
+                    if isinstance(exc, FileNotFoundError)
+                    else "Configure custom viewers in viewers.yaml (see viewers.example.yaml)."
+                )
                 _err(
-                    f"Viewer {viewer_id!r} not found. "
-                    f"People available: {available_people}. "
-                    f"Configure custom viewers in viewers.yaml (see "
-                    "viewers.example.yaml)."
+                    f"Viewer {viewer_id!r} not found in People. "
+                    f"People available: {available_people}. {hint}"
                 )
     elif allow_full_access:
         # `--allow-full-access` without --viewer: build an ad-hoc full-access viewer.
@@ -648,6 +692,42 @@ def _compose_ask_pipeline(
             "Provide --viewer <id> (see viewers.example.yaml) or, in local/dev, "
             "--allow-full-access."
         )
+    if viewer is None:  # pragma: no cover - every branch above resolves or exits
+        _err(f"Could not resolve viewer {viewer_id!r}.")
+    return viewer
+
+
+@contextmanager
+def _compose_ask_pipeline(
+    viewer_id: str | None,
+    allow_full_access: bool,
+    metabase_enabled: bool = False,
+    session_id: str | None = None,
+) -> Iterator[tuple["TextToSqlPipeline", "SemanticViewer"]]:
+    """One composition for ask, chart and evaluation; one model load per operation."""
+    from src.ai_engineering.llm_client import LlmClient
+    from src.ai_engineering.pipeline import TextToSqlPipeline
+    from src.contracts.semantic_layer import SemanticViewer
+    from src.contracts.text_to_sql import LlmConfig, TextToSqlResponse
+    from src.data_engineering.semantic_layer.governed_provider import (
+        build_governed_provider,
+    )
+    from src.data_engineering.semantic_layer.resolver import SemanticQueryResolver
+
+    document, orders_def, semantic_doc, _model_text = _load_semantic_context()
+
+    # --- Fail-fast checks (FR-013) ---
+    try:
+        llm_config = LlmConfig.from_env()
+    except ValueError as exc:
+        _err(str(exc))
+
+    if not _docker_available():
+        _err("Docker is not running. Run `bootstrap` first to start the warehouse.")
+
+    config = PostgresConfig.from_env()
+
+    viewer = _resolve_viewer(viewer_id, allow_full_access, config)
 
     # v3.2 (004-sales-prediction-model amendment): expose the `Predictions`
     # table (Postgres-only — not sourced from the Excel workbook, so it's
@@ -656,9 +736,9 @@ def _compose_ask_pipeline(
     # it, not just the deterministic `predict-sales-nl` single-row path.
     # Best-effort: if the table doesn't exist yet (never seeded), we still
     # advertise its schema — `ask` will just return 0 rows, which is fine.
-    from src.mlops.predictions_store import predictions_table_def
-
-    extra_tables = {"predictions": predictions_table_def()}
+    # v3.3: the `Forecast Accuracy` backtest view is queryable the same way
+    # (single table, own Region column -> same RLS), for model-error questions.
+    extra_tables = _forecast_extra_tables()
 
     llm_client = LlmClient(llm_config)
 
@@ -721,6 +801,7 @@ def _compose_ask_pipeline(
             viewer=viewer,
             on_query_complete=on_query_complete,
             extra_tables=extra_tables,
+            forecast_scope=_active_forecast_scope(),
         )
         yield pipeline, viewer
 
@@ -964,6 +1045,34 @@ def cmd_seed_sales_predictions(environment: str, months_ahead: int, force: bool)
         print(f"Seeded {written} future predictions into 'Predictions' (env={environment}, months_ahead={months_ahead}).")
     else:
         print("Future predictions already present for the active model — skipped (use --force to reseed).")
+
+
+def cmd_backtest_sales_model(environment: str, force: bool = False) -> None:
+    """backtest-sales-model: score the active run's holdout into `Forecast Backtest`.
+
+    Idempotent per run; `bootstrap` already runs it after seeding. Feeds the
+    `Forecast Accuracy` view (predicted vs actual, error) — the M5 drift base.
+    """
+    from src.mlops.backtest import run_backtest
+    from src.mlops.registry import ArtifactRegistry, RegistryError
+
+    if not _docker_available():
+        _err("Docker is not running. Run `bootstrap` first to start the warehouse.")
+
+    orders_def = _infer_orders_table_def()
+    try:
+        with PostgresRepository(config=PostgresConfig.from_env()) as repo:
+            written = run_backtest(repo, orders_def, ArtifactRegistry(),
+                                   environment=cast("Any", environment), force=force)
+    except RegistryError as exc:
+        _err(str(exc))
+    except Exception as exc:
+        _err(f"backtest-sales-model failed: {exc}")
+
+    if written:
+        print(f"Scored {written} holdout order lines into 'Forecast Backtest' (env={environment}).")
+    else:
+        print("Active model already backtested (or no holdout rows) — skipped (use --force to re-score it).")
 
 
 def cmd_predict_sales(environment: str, input_payload: dict[str, str]) -> None:
@@ -1332,6 +1441,122 @@ def cmd_metabase_cards() -> None:
         print(f"  id={card.id:>4}  name={card.name!r}  display={card.display}  viewer={viewer_id}")
 
 
+def cmd_metabase_forecast_dashboard(viewer_id: str, environment: str, replace: bool = False) -> None:
+    """metabase forecast-dashboard: scripted predictive dashboard for one viewer (v3.3).
+
+    Cards are built from the Ossie forecast metrics, every SQL goes through the
+    governed provider (RLS snapshot of the viewer's regions) and is executed
+    once before anything is published, like an `ask` card.
+    """
+    from datetime import datetime, timezone
+
+    from src.ai_engineering.metabase_client import MetabaseClient
+    from src.contracts.metabase import DashcardPlacement, MetabaseConfig
+    from src.data_engineering.semantic_layer.governed_provider import build_governed_provider
+    from src.data_engineering.semantic_layer.resolver import SemanticQueryResolver
+    from src.mlops.registry import ArtifactRegistry
+    from src.reporting.forecast_dashboard import build_forecast_cards
+
+    _document, orders_def, semantic_doc, _model_text = _load_semantic_context()
+    if not _docker_available():
+        _err("Docker is not running. Run `bootstrap` first to start the warehouse.")
+    state = _load_metabase_state()
+    if state is None:
+        _err("Metabase state not found; run `metabase setup` first.")
+    active = ArtifactRegistry().resolve_active_run(cast("Any", environment))
+    if active is None:
+        _err(f"No active sales model in {environment!r}; run `bootstrap` or `seed-sales-predictions` first.")
+    try:
+        specs = build_forecast_cards(semantic_doc, run_id=active.run_id, environment=environment)
+    except ValueError as exc:
+        _err(str(exc))
+
+    config = PostgresConfig.from_env()
+    viewer = _resolve_viewer(viewer_id, False, config)
+
+    # Idempotency first: an existing dashboard is skipped before running any query.
+    try:
+        mb_config = MetabaseConfig.from_env()
+    except ValueError as exc:
+        _err(str(exc))
+    client = MetabaseClient(mb_config)
+    dashboard = client.get_or_create_dashboard(f"Forecast: {viewer.viewer_id}", state.collection_id)
+    if dashboard is None:
+        _err("Could not find or create the forecast dashboard in Metabase.")
+    existing = client.get_dashboard_cards(dashboard.id)
+    if existing is None:
+        _err(f"Could not read dashboard {dashboard.id} from Metabase.")
+    if existing and not replace:
+        print(f"Dashboard {dashboard.name!r} (id={dashboard.id}) already has {len(existing)} cards — "
+              "skipped (use --replace to rebuild it).")
+        return
+
+    with PostgresRepository(config=config) as repo:
+        provider = build_governed_provider(
+            delegate=repo, resolver=SemanticQueryResolver(), viewer=viewer, table_def=orders_def,
+            provenance=semantic_doc.provenance, extra_tables=_forecast_extra_tables(),
+        )
+        prepared = []
+        for spec in specs:
+            try:
+                query = provider.prepare_query(spec.sql, orders_def)
+                provider.execute_prepared_query(query, orders_def)
+            except Exception as exc:
+                _err(f"Card {spec.key!r} failed governed execution, no cards published: {exc}")
+            prepared.append(query)
+
+    # --replace only ever deletes the cards this command created (marked
+    # `source=forecast-dashboard` in their description). Anything else a
+    # user put on the dashboard is kept: the PUT replaces the whole layout,
+    # so those dashcards are re-sent (same id/settings) below the new grid.
+    marker = "source=forecast-dashboard"
+    owned = [ref for ref in existing if marker in (ref.description or "").split()]
+    foreign = [ref.placement for ref in existing if ref not in owned]
+
+    gov_bypass = bool(viewer.allows_full_access and viewer.is_local_dev)
+    created_at = datetime.now(timezone.utc).isoformat()
+    created: list[int] = []
+
+    def rollback(reason: str) -> NoReturn:
+        leftover = [card_id for card_id in created if not client.delete_card(card_id)]
+        detail = f" (could not delete cards {leftover}; remove them by hand)" if leftover else ""
+        _err(f"{reason}; removed the {len(created) - len(leftover)} cards created by this run{detail}, "
+             f"dashboard {dashboard.id} left unchanged.")
+
+    placements: list[DashcardPlacement] = []
+    for spec, query in zip(specs, prepared):
+        description = (
+            f"viewer_id={viewer.viewer_id} gov_bypass={gov_bypass} regions={list(viewer.regions)!r} "
+            f"model_sha256={query.model_sha256} run_id={active.run_id} env={environment} "
+            f"{marker} created_at={created_at}"
+        )
+        card = client.create_card(
+            name=spec.name, sql=query.sql, collection_id=state.collection_id, display=spec.display,
+            description=description, db_id=state.metabase_db_id,
+            visualization_settings=spec.visualization_settings,
+        )
+        if card is None:
+            rollback(f"Metabase rejected card {spec.key!r}")
+        created.append(card.id)
+        placements.append(DashcardPlacement(
+            card_id=card.id, row=spec.row, col=spec.col, size_x=spec.size_x, size_y=spec.size_y,
+        ))
+    if foreign:
+        offset = max(spec.row + spec.size_y for spec in specs) - min(item.row for item in foreign)
+        placements += [item.model_copy(update={"row": item.row + offset}) for item in foreign]
+    if not client.set_dashboard_cards(dashboard.id, placements):
+        rollback(f"The layout of dashboard {dashboard.id} could not be saved")
+    stale = sorted({ref.placement.card_id for ref in owned if ref.placement.card_id is not None})
+    undeleted = [card_id for card_id in stale if not client.delete_card(card_id)]
+    if undeleted:
+        _info(f"WARNING: could not delete previous forecast cards {undeleted} (no longer on the dashboard).")
+
+    kept = f", kept {len(foreign)} other cards" if foreign else ""
+    print(f"Forecast dashboard {dashboard.name!r} (id={dashboard.id}) with {len(specs)} cards{kept} "
+          f"for viewer={viewer.viewer_id} regions={list(viewer.regions)} run_id={active.run_id} env={environment}.")
+    print(f"Open: {mb_config.host.rstrip('/')}/dashboard/{dashboard.id}")
+
+
 def cmd_evaluate(viewer_id: str | None = None, allow_full_access: bool = False) -> None:
     """evaluate: run the sanity-check evaluation (v1.1).
 
@@ -1371,7 +1596,7 @@ def main(argv: list[str] | None = None) -> None:
     """CLI entrypoint: `python -m src.cli <command>`."""
     args = argv if argv is not None else sys.argv[1:]
     if not args or args[0] in ("-h", "--help"):
-        print("Usage: python -m src.cli.main {bootstrap|teardown|validate|generate-dictionary|generate-semantic-layer|metabase|ask|chart|evaluate|train-sales-model|promote-sales-model|predict-sales|predict-sales-nl|seed-sales-predictions} [args]")
+        print("Usage: python -m src.cli.main {bootstrap|teardown|validate|generate-dictionary|generate-semantic-layer|metabase|ask|chart|evaluate|train-sales-model|promote-sales-model|predict-sales|predict-sales-nl|seed-sales-predictions|backtest-sales-model} [args]")
         print("Commands:")
         print("  bootstrap [--source PATH]        Bring up PG, load data, write manifest")
         print("  teardown [--remove-volume]        Stop & remove container (and optionally volume)")
@@ -1380,6 +1605,8 @@ def main(argv: list[str] | None = None) -> None:
         print("  generate-semantic-layer [--export-ossie PATH]")
         print("                                      Read canonical Ossie and generate JSON/Markdown derivatives; optionally export a copy")
         print("  metabase <setup|...>                v2.1 Metabase integration (`metabase setup` to bootstrap)")
+        print("  metabase forecast-dashboard --viewer ID [--env ENV] [--replace]")
+        print("                                      Predictive dashboard from the Ossie forecast metrics (RLS)")
         print("  ask <question> [--viewer <id>] [--no-metabase] [--session <id>] [--json]")
         print("                                      Translate a natural-language question to SQL")
         print("                                      (--viewer <id> resolves a person from the")
@@ -1402,6 +1629,9 @@ def main(argv: list[str] | None = None) -> None:
         print("  seed-sales-predictions [--env ENV] [--months-ahead N] [--force]")
         print("                                      Batch-forecast next months into `Predictions`")
         print("                                      (runs automatically at the end of `bootstrap`)")
+        print("  backtest-sales-model [--env ENV] [--force]")
+        print("                                      Score the active model's holdout (predicted vs")
+        print("                                      actual) into `Forecast Backtest` / `Forecast Accuracy`")
         sys.exit(0 if args else 1)
 
     command = args[0]
@@ -1425,7 +1655,7 @@ def main(argv: list[str] | None = None) -> None:
         # Subcommands: setup | status | teardown | reset-cards.
         # T011 US1: metabase setup. T029-T031 US4: the others.
         if not rest:
-            _err("Usage: python -m src.cli.main metabase <setup|status|teardown|reset-cards|cards>")
+            _err("Usage: python -m src.cli.main metabase <setup|status|teardown|reset-cards|cards|forecast-dashboard>")
         sub = rest[0]
         sub_rest = rest[1:]
         # T011 / T012-T014 (US1)
@@ -1447,7 +1677,34 @@ def main(argv: list[str] | None = None) -> None:
         if sub == "cards":
             cmd_metabase_cards()
             return
-        _err(f"Unknown metabase subcommand: {sub!r}. Use setup|status|teardown|reset-cards|cards.")
+        if sub == "forecast-dashboard":
+            fd_viewer: str | None = None
+            fd_environment = "prod"
+            fd_replace = False
+            i = 0
+            while i < len(sub_rest):
+                tok = sub_rest[i]
+                if tok in {"--viewer", "--env"} and i + 1 < len(sub_rest):
+                    if tok == "--viewer":
+                        fd_viewer = sub_rest[i + 1]
+                    else:
+                        fd_environment = sub_rest[i + 1]
+                    i += 2
+                    continue
+                if tok == "--replace":
+                    fd_replace = True
+                    i += 1
+                    continue
+                fd_viewer = None
+                break
+            if fd_viewer is None:
+                _err("Usage: python -m src.cli.main metabase forecast-dashboard --viewer <id> "
+                     "[--env <dev|staging|prod>] [--replace]")
+            if fd_environment not in {"dev", "staging", "prod"}:
+                _err(f"Invalid environment: {fd_environment!r}. Use dev|staging|prod.")
+            cmd_metabase_forecast_dashboard(fd_viewer, fd_environment, fd_replace)
+            return
+        _err(f"Unknown metabase subcommand: {sub!r}. Use setup|status|teardown|reset-cards|cards|forecast-dashboard.")
         return
     if command == "ask":
         # Parse v2.0/v2.1 flags: --viewer <id>, --allow-full-access,
@@ -1640,9 +1897,26 @@ def main(argv: list[str] | None = None) -> None:
             _err(f"Invalid environment: {seed_environment!r}. Use dev|staging|prod.")
         cmd_seed_sales_predictions(seed_environment, seed_months_ahead, seed_force)
         return
+    if command == "backtest-sales-model":
+        backtest_environment = "prod"
+        backtest_force = False
+        i = 0
+        while i < len(rest):
+            if rest[i] == "--env" and i + 1 < len(rest):
+                backtest_environment = rest[i + 1]
+                i += 2
+            elif rest[i] == "--force":
+                backtest_force = True
+                i += 1
+            else:
+                _err("Usage: python -m src.cli.main backtest-sales-model [--env <dev|staging|prod>] [--force]")
+        if backtest_environment not in {"dev", "staging", "prod"}:
+            _err(f"Invalid environment: {backtest_environment!r}. Use dev|staging|prod.")
+        cmd_backtest_sales_model(backtest_environment, backtest_force)
+        return
     handler = _COMMANDS.get(command)
     if handler is None:
-        _err(f"Unknown command: {command!r}. Use bootstrap|teardown|validate|generate-dictionary|generate-semantic-layer|metabase|ask|chart|evaluate|train-sales-model|promote-sales-model|predict-sales|predict-sales-nl|seed-sales-predictions.")
+        _err(f"Unknown command: {command!r}. Use bootstrap|teardown|validate|generate-dictionary|generate-semantic-layer|metabase|ask|chart|evaluate|train-sales-model|promote-sales-model|predict-sales|predict-sales-nl|seed-sales-predictions|backtest-sales-model.")
 
     # Parse simple per-command args.
     if command == "bootstrap":

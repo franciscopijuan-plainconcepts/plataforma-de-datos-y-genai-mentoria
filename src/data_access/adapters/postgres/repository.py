@@ -110,6 +110,13 @@ class PostgresRepository:
             cur.execute(ddl)
         self._conn.commit()
 
+    def create_or_replace_view(self, name: str, select_sql: str) -> None:
+        """CREATE OR REPLACE VIEW from a platform-authored SELECT (never LLM SQL)."""
+        ddl = SQL("CREATE OR REPLACE VIEW {} AS {}").format(Identifier(name), SQL(select_sql))
+        with self._conn.cursor() as cur:
+            cur.execute(ddl)
+        self._conn.commit()
+
     def drop_table(self, name: str) -> None:
         """Drop a table by name (IF EXISTS to be idempotent)."""
         with self._conn.cursor() as cur:
@@ -204,6 +211,17 @@ class PostgresRepository:
             )
             raw_rows = cur.fetchall()
         return [OrderRow.model_validate(r) for r in raw_rows]
+
+    def delete_rows_where(self, table_name: str, column: str, value: str) -> int:
+        """Parameterized `DELETE ... WHERE column = value` (identifiers quoted)."""
+        with self._conn.cursor() as cur:
+            cur.execute(
+                SQL("DELETE FROM {} WHERE {} = %s").format(Identifier(table_name), Identifier(column)),
+                (value,),
+            )
+            deleted = cur.rowcount
+        self._conn.commit()
+        return deleted
 
     def count_rows(self, table_name: str) -> int:
         """Return the row count of a table (used by the validator)."""

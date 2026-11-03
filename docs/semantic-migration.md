@@ -452,3 +452,32 @@ RUN_SEMANTIC_METABASE_TESTS=1 uv run --frozen python -m pytest -q \
   tests/integration/test_semantic_rollback.py \
   -k 'not test_is_setup_complete_false_when_setup_token_present'
 ```
+
+## Datasets gestionados por el warehouse (v3.3)
+
+`Predictions` y la view `Forecast Accuracy` no vienen del workbook, por lo que
+el diccionario no los conoce. La composición (CLI y agente) pasa sus `TableDef`
+a `import_ossie(text, dictionary, warehouse_tables)`:
+
+- Los datasets del diccionario siguen siendo obligatorios. Los del warehouse
+  son opcionales, pero si se declaran cumplen las mismas reglas de campos
+  completos y PK verificada contra su `TableDef`. Cualquier otro dataset se
+  rechaza, y un `warehouse_tables` no puede ocultar uno del diccionario.
+- Cada métrica declara `source_table` (Orders | Predictions | Forecast
+  Accuracy). La fórmula se valida `FROM` esa tabla y solo con sus columnas.
+  Returns solo es accesible desde Orders.
+- Las dependencias entre métricas respetan la tabla: `derives_from` no puede
+  cruzar tablas (una métrica solo deriva de otras de su misma `source_table`)
+  y `uses_returns` solo se permite en métricas de Orders.
+- `semantic/sales.ossie.yaml` queda en `content_version` 1.1.0 con 15 métricas:
+  8 de Orders, `predicted_sales` y `avg_predicted_line_sales` sobre
+  Predictions, y `backtest_actual_sales`, `backtest_predicted_sales`,
+  `forecast_abs_error`, `forecast_wape` y `forecast_bias` sobre Forecast
+  Accuracy. Se generaron con `propose_semantic_update.py` (que ahora admite
+  `source_table`) a partir de `ejemplos/metricas-forecast.md` y se revisaron a
+  mano (3 renombrados).
+- No se declaran dimensiones fuera de Orders, por lo que el bloque de
+  dimensiones del prompt no cambia.
+- La proyección del workbook (8 métricas de Orders, 11 dimensiones) sigue
+  siendo idéntica a la legacy: `tests/integration/test_ossie_candidate.py`
+  compara ese subconjunto.

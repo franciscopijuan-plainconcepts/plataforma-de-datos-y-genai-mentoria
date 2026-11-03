@@ -24,7 +24,7 @@ from pydantic import BaseModel, ConfigDict, Field
 # A Row is any of the typed per-table row models. This union is the input
 # type for `DataProvider.load_rows` so a single semantic bulk-load method
 # can accept any table's rows without leaking engine-specific concerns.
-Row = Union["OrderRow", "ReturnRow", "PersonRow", "PredictionRow"]
+Row = Union["OrderRow", "ReturnRow", "PersonRow", "PredictionRow", "BacktestRow"]
 
 
 class LogicalType(str, Enum):
@@ -203,3 +203,27 @@ class PredictionRow(BaseModel):
     discount: Decimal = Field(validation_alias="Discount")
     used_fallback_encoding: bool = Field(validation_alias="Used Fallback Encoding")
     latency_ms: int = Field(validation_alias="Latency Ms")
+
+
+class BacktestRow(BaseModel):
+    """One row of the `Forecast Backtest` table (v3.3, M5 accuracy base).
+
+    A real historical order line from the model's chronological holdout
+    (`Order Date >= split_cutoff_date`), scored by the run that never saw it
+    in training: actual vs predicted `Sales` for the same line.
+    """
+
+    model_config = ConfigDict(frozen=True, populate_by_name=True)
+
+    backtest_id: str = Field(validation_alias="Backtest ID")  # "<run_id>:<n>"
+    run_id: str = Field(validation_alias="Run ID")
+    model_name: str = Field(validation_alias="Model Name")
+    trained_at: datetime = Field(validation_alias="Trained At")
+    order_date: datetime = Field(validation_alias="Order Date")
+    region: str = Field(validation_alias="Region")
+    market: str = Field(validation_alias="Market")
+    category: str = Field(validation_alias="Category")
+    sub_category: str = Field(validation_alias="Sub-Category")
+    actual_sales: Decimal = Field(validation_alias="Actual Sales")
+    predicted_sales: Decimal = Field(validation_alias="Predicted Sales")
+    scored_at: datetime = Field(validation_alias="Scored At")

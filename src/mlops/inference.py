@@ -64,11 +64,25 @@ def _predict(
     model_name: str,
     feature_row: SalesFeatureRow,
 ) -> float:
+    return predict_feature_rows(model, model_name, [feature_row])[0]
+
+
+def predict_feature_rows(
+    model: Pipeline | CatBoostRegressor,
+    model_name: str,
+    feature_rows: list[SalesFeatureRow],
+) -> list[float]:
+    """Score many feature rows with an already-loaded model in one call.
+
+    Single prediction path shared by `predict_sales` and the batch backtest.
+    Sales can't be negative (`SalesFeatureRow.sales >= 0`), but the linear
+    model can extrapolate below zero, so predictions are clamped at 0.
+    """
     if model_name == "linear_regression":
-        prediction = model.predict(build_linear_feature_matrix([feature_row]))
+        predictions = model.predict(build_linear_feature_matrix(feature_rows))
     else:
-        prediction = model.predict(build_catboost_feature_matrix([feature_row]))
-    return float(prediction[0])
+        predictions = model.predict(build_catboost_feature_matrix(feature_rows))
+    return [max(0.0, float(value)) for value in predictions]
 
 
 def _check_unseen_categories(
@@ -98,4 +112,4 @@ def _log_prediction_call(
         handle.write(json.dumps(payload, sort_keys=True) + "\n")
 
 
-__all__ = ["predict_sales"]
+__all__ = ["predict_feature_rows", "predict_sales"]
