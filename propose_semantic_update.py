@@ -32,9 +32,12 @@ _CANDIDATE_PATH = _REPO_ROOT / "semantic" / "sales.ossie.candidate.yaml"
 _SOURCE_XLSX = _REPO_ROOT / "Global Superstore Data.xlsx"
 
 
+class AgentError(RuntimeError):
+    """Error de negocio del agente (documento, LLM o validacion oficial)."""
+
+
 def _die(msg: str) -> None:
-    print(f"ERROR: {msg}", file=sys.stderr)
-    sys.exit(1)
+    raise AgentError(msg)
 
 
 # ---------- 1. leer el documento de entrada ----------
@@ -212,12 +215,12 @@ def metric_block(p: dict) -> dict:
     }
 
 
-def main() -> None:
-    if len(sys.argv) < 2:
-        print(__doc__)
-        sys.exit(1)
-    doc_path = Path(sys.argv[1])
+def run_agent(doc_path: Path, log=print) -> dict:
+    """Flujo completo del agente; devuelve el resultado estructurado.
 
+    `log` recibe el progreso (print en CLI, st.write/status en la web).
+    Lanza AgentError si el documento, el LLM o la validacion fallan.
+    """
     from src.data_engineering.semantic_layer.ossie import (
         conversion_report,
         import_ossie,
@@ -229,24 +232,25 @@ def main() -> None:
     # Tablas del warehouse (no vienen del workbook) que el modelo puede declarar.
     warehouse_tables = forecast_semantic_tables()
 
-    print(f"[1/5] Leyendo documento de negocio: {doc_path.name}")
+    log(f"[1/5] Leyendo documento de negocio: {doc_path.name}")
     document_text = read_input_document(doc_path)
 
-    print("[2/5] Cargando modelo Ossie activo + diccionario del warehouse...")
+    log("[2/5] Cargando modelo Ossie activo + diccionario del warehouse...")
     active_text = read_ossie_document(_MODEL_PATH)
     model_raw = yaml.safe_load(active_text)
     dictionary = build_dictionary()
     columns, metrics, existing = model_context(model_raw)
 
-    print("[3/5] El agente analiza el documento y redacta su propuesta...")
+    log("[3/5] El agente analiza el documento y redacta su propuesta...")
     result = ask_llm(columns, metrics, document_text)
     proposals = [p for p in result.get("proposals", []) if p.get("name") not in existing]
     out_of_scope = result.get("out_of_scope", [])
+    empty = {"proposals": [], "out_of_scope": [], "candidate_pretty": "", "diff": [],
+             "model_sha256": "", "candidate_path": str(_CANDIDATE_PATH)}
     if not proposals and not out_of_scope:
-        print("El agente no encontro nada que proponer.")
-        return
+        return empty
 
-    print(f"[4/5] Construyendo candidato con {len(proposals)} metrica(s) nueva(s)...")
+    log(f"[4/5] Construyendo candidato con {len(proposals)} metrica(s) nueva(s)...")
 
     # Bucle agentico: construir -> validar con la frontera OFICIAL -> si la
     # plataforma rechaza, devolver el error al LLM para que corrija (max 2).
@@ -262,8 +266,8 @@ def main() -> None:
         except Exception as exc:
             if fix_round == 2:
                 _die(f"El candidato NO supera la validacion oficial tras 3 intentos:\n{exc}")
-            print(f"      La plataforma rechazo el candidato: {exc}")
-            print(f"      El agente corrige su propuesta (ronda {fix_round + 1})...")
+            log(f"La plataforma rechazo el candidato: {exc}")
+            log(f"El agente corrige su propuesta (ronda {fix_round + 1})...")
             fix_prompt = (
                 "Tus metricas propuestas fueron RECHAZADAS por el validador oficial "
                 f"de la plataforma con este error:\n  {exc}\n\n"
@@ -285,14 +289,42 @@ def main() -> None:
                 proposals = [p for p in fixed.get("proposals", []) if p.get("name") not in existing]
                 out_of_scope = fixed.get("out_of_scope", out_of_scope)
             except json.JSONDecodeError:
-                print("      (correccion no-JSON, reintento con las mismas propuestas)")
+                log("(correccion no-JSON, reintento con las mismas propuestas)")
     report = conversion_report(candidate_text)
     candidate_pretty = serialize_ossie_yaml(candidate_text)
     _CANDIDATE_PATH.write_text(candidate_pretty, encoding="utf-8")
+    active_pretty = serialize_ossie_yaml(active_text)
+    diff = list(difflib.unified_diff(
+        active_pretty.splitlines(), candidate_pretty.splitlines(),
+        fromfile="sales.ossie.yaml (activo)", tofile="sales.ossie.candidate.yaml",
+        lineterm="", n=2,
+    ))
+    log("[5/5] Candidato validado.")
+    return {
+        "proposals": proposals,
+        "out_of_scope": out_of_scope,
+        "candidate_pretty": candidate_pretty,
+        "diff": diff,
+        "model_sha256": report.model_sha256,
+        "candidate_path": str(_CANDIDATE_PATH),
+    }
 
-    print("[5/5] Candidato validado. Resumen:\n")
-    print("=" * 72)
-    for p in proposals:
+
+def main() -> None:
+    if len(sys.argv) < 2:
+        print(__doc__)
+        sys.exit(1)
+    try:
+        res = run_agent(Path(sys.argv[1]))
+    except AgentError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        sys.exit(1)
+    if not res["proposals"] and not res["out_of_scope"]:
+        print("El agente no encontro nada que proponer.")
+        return
+
+    print("\nResumen:\n" + "=" * 72)
+    for p in res["proposals"]:
         print(f"METRICA PROPUESTA: {p['name']}")
         print(f"  tabla      : {p.get('source_table', 'Orders')}")
         print(f"  formula    : {p['expression']}")
@@ -303,24 +335,18 @@ def main() -> None:
         for q in p.get("questions", []):
             print(f"  PREGUNTA A NEGOCIO: {q}")
         print("-" * 72)
-    for o in out_of_scope:
+    for o in res["out_of_scope"]:
         print(f"FUERA DE ALCANCE: {o.get('item')}\n  motivo: {o.get('reason')}")
         print("-" * 72)
 
-    # Diff canonico (ambos lados normalizados por la plataforma).
-    active_pretty = serialize_ossie_yaml(active_text)
-    diff = list(difflib.unified_diff(
-        active_pretty.splitlines(), candidate_pretty.splitlines(),
-        fromfile="sales.ossie.yaml (activo)", tofile="sales.ossie.candidate.yaml",
-        lineterm="", n=2,
-    ))
+    diff = res["diff"]
     print(f"\nDIFF ({max(len(diff) - 4, 0)} lineas):")
     for line in diff[:120]:
         print(line)
 
     print("\n" + "=" * 72)
-    print(f"Candidato escrito en: {_CANDIDATE_PATH.relative_to(_REPO_ROOT)}")
-    print(f"Hash del candidato  : {report.model_sha256[:16]}...")
+    print(f"Candidato escrito en: {res['candidate_path']}")
+    print(f"Hash del candidato  : {res['model_sha256'][:16]}...")
     print("""
 SIGUIENTES PASOS (aprobacion humana — el agente NO activa nada):
   1. Revisar supuestos y preguntas de arriba con negocio.

@@ -53,11 +53,29 @@ st.markdown(
   --accent: #2F69FF;
 }
 
+html, body { background: var(--bg); }
 html, body, [data-testid="stAppViewContainer"] {
-  background: var(--bg);
   font-family: 'Inter', -apple-system, 'Segoe UI', sans-serif;
   color: var(--ink);
 }
+/* fondo con profundidad: aurora azul sutil + retícula de puntos (datos) */
+[data-testid="stAppViewContainer"] {
+  background:
+    radial-gradient(1100px 520px at 18% -12%, rgba(47, 105, 255, 0.16), transparent 62%),
+    radial-gradient(800px 420px at 92% -6%, rgba(47, 105, 255, 0.07), transparent 55%),
+    radial-gradient(circle at 1px 1px, rgba(154, 161, 171, 0.055) 1px, transparent 1.6px) 0 0 / 26px 26px,
+    var(--bg);
+}
+
+/* los iconos de Streamlit usan la fuente Material: no pisarla con Inter */
+[data-testid="stIconMaterial"], .material-symbols-rounded, [class*="material-symbols"] {
+  font-family: 'Material Symbols Rounded' !important;
+}
+
+/* scrollbar discreta */
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-thumb { background: var(--line); border-radius: 8px; }
+::-webkit-scrollbar-track { background: transparent; }
 
 /* limpiar el chrome de Streamlit */
 #MainMenu, footer, [data-testid="stToolbar"], [data-testid="stDecoration"] { display: none; }
@@ -192,6 +210,145 @@ code, pre, [data-testid="stCode"] * { font-family: 'IBM Plex Mono', monospace !i
   flex-wrap: wrap;
 }
 .credits b { color: var(--ink); font-weight: 600; }
+
+/* ---- pulido visual ---- */
+
+/* recuperar el espacio muerto superior y acotar el ancho de lectura */
+.block-container { padding-top: 2.2rem !important; max-width: 1060px; }
+
+/* cabecera mas compacta, logo con presencia */
+.brand-row { margin-bottom: 1.2rem; }
+.brand-row img { height: 40px; }
+
+/* selector de modo como control segmentado */
+[data-testid="stRadio"] [role="radiogroup"] { gap: 0; }
+[data-testid="stRadioOption"] {
+  border: 1px solid var(--line);
+  padding: 0.4rem 1.3rem;
+  margin: 0 !important;
+  background: var(--panel);
+  cursor: pointer;
+  transition: background 140ms ease;
+}
+[data-testid="stRadioOption"]:first-child { border-radius: 10px 0 0 10px; }
+[data-testid="stRadioOption"]:last-child { border-radius: 0 10px 10px 0; border-left: none; }
+[data-testid="stRadioOption"] > div > div:first-child { display: none; }
+[data-testid="stRadioOption"][data-selected="true"] { background: var(--accent); border-color: var(--accent); }
+[data-testid="stRadioOption"][data-selected="true"] p { color: #FFFFFF !important; font-weight: 600; }
+[data-testid="stRadioOption"] p { color: var(--muted); font-size: 0.9rem; }
+
+/* chips sin recortes */
+.stButton > button[kind="secondary"] { white-space: nowrap; }
+
+/* sidebar: mas ancho y campos integrados en el tema */
+[data-testid="stSidebar"] { min-width: 21rem; max-width: 21rem; }
+[data-testid="stSelectbox"] [data-baseweb="select"] > div {
+  background: var(--panel); border-color: var(--line); border-radius: 10px;
+}
+
+/* cargador de documentos del agente */
+[data-testid="stFileUploaderDropzone"] {
+  background: var(--panel); border: 1px dashed #3A4150; border-radius: 12px;
+}
+
+/* tarjeta del modelo semantico activo */
+.model-card {
+  border: 1px solid var(--line); border-radius: 10px;
+  padding: 0.7rem 0.9rem; margin-top: 1.6rem;
+  font-size: 0.78rem; color: var(--muted); line-height: 1.55;
+}
+.model-card b { color: var(--ink); }
+.model-card .hash { font-family: 'IBM Plex Mono', monospace; }
+
+/* ---- rediseño: superficie y jerarquía ---- */
+
+/* titular con degradado frío muy sutil */
+.brand-row h1 {
+  background: linear-gradient(120deg, #FFFFFF 58%, #9DB9FF 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+/* la consola de consulta: panel con presencia */
+[data-testid="stVerticalBlockBorderWrapper"] {
+  background: linear-gradient(180deg, rgba(22, 26, 33, 0.92), rgba(16, 19, 24, 0.92));
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  padding: 0.35rem 0.5rem;
+  box-shadow: 0 18px 50px -28px rgba(0, 0, 0, 0.8);
+}
+
+/* campos mas altos y comodos */
+[data-testid="stTextInput"] input { padding: 0.8rem 1rem; font-size: 1.02rem; }
+[data-testid="stSelectbox"] [data-baseweb="select"] > div { min-height: 2.9rem; }
+
+/* pildoras de ejemplos */
+[data-testid="stButtonGroup"] button[data-variant="pills"] {
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--muted);
+  font-size: 0.82rem;
+  padding: 0.22rem 0.85rem;
+  transition: border-color 140ms ease, color 140ms ease;
+}
+[data-testid="stButtonGroup"] button[data-variant="pills"] p { font-size: 0.82rem; color: inherit; }
+[data-testid="stButtonGroup"] button[data-variant="pills"]:hover { border-color: var(--accent); color: var(--ink); }
+[data-testid="stButtonGroup"] button[data-variant="pills"][data-selected="true"] {
+  border-color: var(--accent); color: var(--ink);
+}
+
+/* expanders y status integrados */
+[data-testid="stExpander"] details {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+}
+
+/* separadores silenciosos */
+hr { border-color: var(--line) !important; }
+
+/* el boton del uploader */
+[data-testid="stFileUploaderDropzone"] button {
+  background: var(--panel);
+  color: var(--ink);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+}
+
+/* pie minimo */
+.credits { justify-content: center; }
+
+/* tira de cifras reales */
+.stat-strip { display: flex; gap: 2.6rem; margin: 0.5rem 0 1.3rem 0; flex-wrap: wrap; }
+.stat .n {
+  font-family: 'Space Grotesk', sans-serif;
+  font-size: 1.75rem; font-weight: 700; letter-spacing: -0.02em;
+  color: var(--ink);
+}
+.stat .l { font-size: 0.75rem; color: var(--muted); margin-top: 0.1rem; }
+
+/* la consola (el bloque con el campo de pregunta) brilla; el resto, quieto */
+[data-testid="stVerticalBlockBorderWrapper"]:has([data-testid="stTextInput"]) {
+  border-color: rgba(47, 105, 255, 0.4);
+  box-shadow:
+    0 0 0 1px rgba(47, 105, 255, 0.12),
+    0 24px 70px -30px rgba(47, 105, 255, 0.35),
+    0 18px 50px -28px rgba(0, 0, 0, 0.8);
+}
+
+/* tarjetas de capacidades (estado vacio) */
+.feature-row { display: flex; gap: 0.9rem; margin-top: 1.4rem; flex-wrap: wrap; }
+.feature {
+  flex: 1 1 220px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 0.95rem 1.05rem;
+}
+.feature .t { font-family: 'Space Grotesk', sans-serif; font-weight: 700; font-size: 0.95rem; margin-bottom: 0.35rem; }
+.feature .d { font-size: 0.82rem; color: var(--muted); line-height: 1.5; }
 </style>
 """,
     unsafe_allow_html=True,
@@ -212,7 +369,7 @@ st.markdown(
 <div class="brand-row">
   <div>
     <div class="eyebrow">Mentorship Program &mdash; From GenAI Blog to GenAI Use Case</div>
-    <h1 style="margin:0; font-size:2.1rem;">Plataforma de Datos y GenAI</h1>
+    <h1 style="margin:0; font-size:2.6rem;">Plataforma de Datos y GenAI</h1>
   </div>
   {_logo_img}
 </div>
@@ -220,11 +377,104 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
+_modo = st.radio(
+    "Modo",
+    ["Consultas", "Agente semántico"],
+    horizontal=True,
+    label_visibility="collapsed",
+)
+
+
+def _render_pie() -> None:
+    st.markdown(
+        """
+<div class="credits">
+  <span>Mentorship Program &mdash; <b>From GenAI Blog to GenAI Use Case</b></span>
+</div>
+""",
+        unsafe_allow_html=True,
+    )
+
+
+# ---------- modo: agente semantico ----------
+
+if _modo == "Agente semántico":
+    import tempfile
+
+    import propose_semantic_update as _agente
+
+    st.markdown(
+        "Sube un documento de negocio (Excel, CSV, Markdown o texto). El agente "
+        "propone nuevas métricas para el modelo semántico Ossie, declara sus "
+        "supuestos, valida el candidato con la plataforma y lo deja listo para PR "
+        "— **nada se activa sin aprobación humana**."
+    )
+
+    _doc = st.file_uploader(
+        "Documento de negocio",
+        type=["xlsx", "csv", "md", "txt"],
+        help="Por ejemplo: peticiones de métricas de Finanzas, definiciones de negocio, actas…",
+    )
+    if _doc is not None and st.button("Analizar y proponer", type="primary"):
+        _tmp = Path(tempfile.gettempdir()) / _doc.name
+        _tmp.write_bytes(_doc.getvalue())
+        with st.status("El agente está trabajando…", expanded=True) as _status:
+            try:
+                _res = _agente.run_agent(_tmp, log=st.write)
+                st.session_state["agent_res"] = _res
+                st.session_state["agent_doc"] = _doc.name
+                _status.update(label="Candidato validado por la plataforma", state="complete", expanded=False)
+            except _agente.AgentError as exc:
+                _status.update(label="El agente no pudo completar la propuesta", state="error")
+                st.error(str(exc))
+
+    _res = st.session_state.get("agent_res")
+    if _res:
+        st.markdown(
+            f'<div class="section-label">Propuesta para {st.session_state.get("agent_doc", "el documento")} '
+            f'&middot; hash {_res["model_sha256"][:12]}</div>',
+            unsafe_allow_html=True,
+        )
+        if not _res["proposals"] and not _res["out_of_scope"]:
+            st.info("El agente no encontró nada que proponer en este documento.")
+        for p in _res["proposals"]:
+            with st.container(border=True):
+                st.markdown(f"**{p['name']}**  ·  tabla `{p.get('source_table', 'Orders')}`")
+                st.code(p["expression"], language="sql")
+                st.markdown(p.get("rationale", p.get("description", "")))
+                if p.get("assumption"):
+                    st.warning(f"**Supuesto declarado:** {p['assumption']}")
+                for q in p.get("questions", []):
+                    st.info(f"**Pregunta a negocio:** {q}")
+        for o in _res["out_of_scope"]:
+            with st.container(border=True):
+                st.markdown(f"🚫 **Fuera de alcance:** {o.get('item', '')}")
+                st.caption(o.get("reason", ""))
+        if _res["diff"]:
+            with st.expander(f"Diff contra el modelo activo ({max(len(_res['diff']) - 4, 0)} líneas)"):
+                st.code("\n".join(_res["diff"]), language="diff")
+        if _res["candidate_pretty"]:
+            st.download_button(
+                "Descargar candidato (sales.ossie.candidate.yaml)",
+                data=_res["candidate_pretty"],
+                file_name="sales.ossie.candidate.yaml",
+                mime="text/yaml",
+            )
+            st.caption(
+                "Siguientes pasos: revisar los supuestos con negocio, abrir una rama con el "
+                "candidato como `semantic/sales.ossie.yaml` (subiendo `content_version`), "
+                "regenerar la capa semántica y aprobar por PR."
+            )
+
+    _render_pie()
+    st.stop()
+
 st.markdown(
     "Formula una pregunta sobre las ventas de Global Superstore. "
     "El modelo genera la consulta SQL, la plataforma la valida y la ejecuta "
     "sobre el warehouse, y la visualización se publica en Metabase."
 )
+
 
 # ---------- sidebar ----------
 
@@ -268,8 +518,41 @@ def _semantic_model_info() -> tuple[str, str]:
     return version, conversion_report(text).model_sha256[:12]
 
 
+@st.cache_data(ttl=600)
+def _hero_stats() -> dict:
+    """Cifras reales para la cabecera. Best-effort: lo que falle se omite."""
+    stats = {}
+    try:
+        with psycopg.connect(_conn_info()) as conn, conn.cursor() as cur:
+            cur.execute('SELECT (SELECT COUNT(*) FROM "Orders") + (SELECT COUNT(*) FROM "Returns") + (SELECT COUNT(*) FROM "People")')
+            stats["filas"] = f"{cur.fetchone()[0]:,}".replace(",", ".")
+    except Exception:
+        pass
+    try:
+        with psycopg.connect(_conn_info()) as conn, conn.cursor() as cur:
+            cur.execute('SELECT SUM("Abs Error") / NULLIF(SUM("Actual Sales"), 0) FROM "Forecast Accuracy" WHERE "Run ID" = (SELECT MAX("Run ID") FROM "Forecast Accuracy")')
+            wape = cur.fetchone()[0]
+            if wape is not None:
+                stats["precision"] = f"{(1 - float(wape)) * 100:.1f}".replace(".", ",") + "%"
+    except Exception:
+        pass
+    try:
+        import yaml as _yaml
+        raw = _yaml.safe_load((Path(__file__).with_name("semantic") / "sales.ossie.yaml").read_text(encoding="utf-8"))
+        stats["metricas"] = str(len(raw.get("metrics", [])))
+        stats["tablas"] = str(len(raw.get("datasets", [])))
+    except Exception:
+        pass
+    return stats
+
+
 with st.sidebar:
-    st.markdown('<div class="eyebrow" style="margin-top:0.6rem;">Gobierno de datos</div>', unsafe_allow_html=True)
+    if _logo_b64:
+        st.markdown(
+            f'<img src="data:image/svg+xml;base64,{_logo_b64}" style="height:20px; opacity:0.85; margin:0.4rem 0 1.1rem 0;">',
+            unsafe_allow_html=True,
+        )
+    st.markdown('<div class="eyebrow" style="margin-top:0.2rem;">Gobierno de datos</div>', unsafe_allow_html=True)
     try:
         people = _load_people()
         viewer = st.selectbox(
@@ -307,39 +590,67 @@ with st.sidebar:
     try:
         _version, _hash = _semantic_model_info()
         st.markdown(
-            '<div class="eyebrow" style="margin-top:1.6rem;">Modelo semántico</div>'
-            f'<div style="font-size:0.78rem; color:#9AA1AB;">Apache Ossie · '
-            f'sales v{_version}<br>hash <span style="font-family:monospace;">{_hash}</span></div>',
+            '<div class="model-card">Modelo semántico activo<br>'
+            f'<b>Apache Ossie · sales v{_version}</b><br>'
+            f'<span class="hash">{_hash}</span></div>',
             unsafe_allow_html=True,
         )
     except Exception:
         pass
 
+try:
+    _stats = _hero_stats()
+    _tiles = [(v, l) for k, v, l in [
+        ("filas", _stats.get("filas"), "filas gobernadas"),
+        ("metricas", _stats.get("metricas"), "métricas semánticas"),
+        ("tablas", _stats.get("tablas"), "tablas en el modelo"),
+        ("precision", _stats.get("precision"), "precisión del forecast"),
+    ] if v]
+    if _tiles:
+        st.markdown(
+            '<div class="stat-strip">' + "".join(
+                f'<div class="stat"><div class="n">{v}</div><div class="l">{l}</div></div>'
+                for v, l in _tiles
+            ) + "</div>",
+            unsafe_allow_html=True,
+        )
+except Exception:
+    pass
+
 # ---------- pregunta ----------
 
-_EJEMPLOS = [
-    "ventas netas por categoría",
-    "evolución de las ventas mes a mes",
-    "qué ventas predice el modelo por categoría",
-    "qué precisión tiene el forecast del modelo",
-    "países donde perdemos dinero",
-]
+_EJEMPLOS = {
+    "Ventas netas": "ventas netas por categoría",
+    "Evolución mensual": "evolución de las ventas mes a mes",
+    "Predicción 6 meses": "qué ventas predice el modelo para los próximos meses por categoría",
+    "Precisión del forecast": "qué precisión tiene el forecast del modelo",
+    "Países en pérdidas": "países donde perdemos dinero",
+}
 
 
-def _usar_ejemplo(texto: str) -> None:
-    st.session_state["question_input"] = texto
+def _aplicar_ejemplo() -> None:
+    sel = st.session_state.get("ejemplo_pill")
+    if sel:
+        st.session_state["question_input"] = _EJEMPLOS[sel]
 
 
-question = st.text_input(
-    "Tu pregunta",
-    placeholder="Ejemplo: evolución de las ventas mes a mes",
-    key="question_input",
-)
-_cols = st.columns(len(_EJEMPLOS))
-for _col, _ej in zip(_cols, _EJEMPLOS):
-    with _col:
-        st.button(_ej, key=f"ej_{_ej}", on_click=_usar_ejemplo, args=(_ej,), width="stretch")
-run = st.button("Consultar", type="primary")
+with st.container(border=True):
+    _c_input, _c_boton = st.columns([5, 1.2], vertical_alignment="bottom")
+    with _c_input:
+        question = st.text_input(
+            "Tu pregunta",
+            placeholder="Ejemplo: evolución de las ventas mes a mes",
+            key="question_input",
+        )
+    with _c_boton:
+        run = st.button("Consultar", type="primary", width="stretch")
+    st.pills(
+        "Ejemplos",
+        list(_EJEMPLOS),
+        key="ejemplo_pill",
+        label_visibility="collapsed",
+        on_change=_aplicar_ejemplo,
+    )
 
 # ---------- explicacion de resultados ----------
 
@@ -486,6 +797,18 @@ if run and question.strip():
 # ---------- resultados (persisten entre interacciones) ----------
 
 last = st.session_state.get("last")
+if not last:
+    st.markdown(
+        """<div class="feature-row">
+  <div class="feature"><div class="t">SQL gobernado</div>
+    <div class="d">Cada consulta pasa el validador AST y el filtro RLS de la persona activa. Nada se ejecuta sin control.</div></div>
+  <div class="feature"><div class="t">Métricas con significado</div>
+    <div class="d">Ventas netas, precisión del forecast… las definiciones viven en el modelo Ossie, no en el prompt de turno.</div></div>
+  <div class="feature"><div class="t">De la pregunta al dashboard</div>
+    <div class="d">Resultados, gráfica, lectura de negocio y publicación en Metabase — en una sola pasada.</div></div>
+</div>""",
+        unsafe_allow_html=True,
+    )
 if last:
     st.markdown('<div class="fade-block">', unsafe_allow_html=True)
     st.markdown('<div class="section-label">Consulta SQL validada</div>', unsafe_allow_html=True)
@@ -548,12 +871,4 @@ if last:
 
 # ---------- pie ----------
 
-st.markdown(
-    """
-<div class="credits">
-  <span>Mentorship Program &mdash; <b>From GenAI Blog to GenAI Use Case</b></span>
-  <span>Dirección &middot; <b>Tomás Morales</b> &nbsp;&nbsp; Desarrollo &middot; <b>Alan Teixidó Sararols</b></span>
-</div>
-""",
-    unsafe_allow_html=True,
-)
+_render_pie()
